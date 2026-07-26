@@ -26,7 +26,7 @@ module.exports = {
       
       // Enforce DB isolation rules:
       // Release uses OneSpaceDB
-      // Local/Staging uses StOneSpaceDB
+      // Local/Development uses StOneSpaceDB
       if (appEnv === 'release') {
         return uri.replace(/\/[^/?]+(\?|$)/, '/OneSpaceDB$1');
       } else {
