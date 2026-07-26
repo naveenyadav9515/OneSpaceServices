@@ -41,6 +41,17 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
+          # Get the latest version from git tags (source of truth)
+          LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          CURRENT_VERSION="${LATEST_TAG#v}"
+          echo "Current version from tags: $CURRENT_VERSION"
+          
+          # Sync package.json to match the latest tag
+          npm version "$CURRENT_VERSION" --no-git-tag-version --allow-same-version
+          
           # Determine version bump based on Conventional Commits
           if echo "$COMMIT_MSG" | grep -qE "^[a-zA-Z]+!:" || echo "$COMMIT_MSG" | grep -q "BREAKING CHANGE"; then
             echo "Major bump requested"
@@ -53,8 +64,9 @@ jobs:
             npm version patch --no-git-tag-version
           fi
           
-          # Create and push ONLY the tag to prevent branch divergence
+          # Create and push the new tag
           NEW_VERSION=$(node -p "require('./package.json').version")
+          echo "New version: $NEW_VERSION"
           git tag "v$NEW_VERSION"
           git push origin "v$NEW_VERSION"
 
