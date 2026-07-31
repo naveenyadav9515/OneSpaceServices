@@ -39,6 +39,17 @@ const userSchema = new mongoose.Schema({
     type: String,
     select: false,
   },
+  /**
+   * The Gmail address that was actually authorised, which may differ from the
+   * OneSpace login email. Pub/Sub notifications identify a mailbox by this
+   * address, so matching on `email` alone silently drops their notifications.
+   */
+  gmailAddress: {
+    type: String,
+    lowercase: true,
+    default: null,
+    index: true,
+  },
   expenseAutomationEnabled: {
     type: Boolean,
     default: false,
@@ -54,7 +65,36 @@ const userSchema = new mongoose.Schema({
   gmailHistoryId: {
     type: String,
     default: null,
-  }
+  },
+  /**
+   * Scopes Google actually granted, as reported by the token response.
+   *
+   * Stored because Google's consent screen lets the user untick Gmail access
+   * while still completing the flow — without this we cannot tell a genuinely
+   * connected account from one that will 403 on every request.
+   */
+  gmailScopes: {
+    type: [String],
+    default: [],
+  },
+  gmailConnectedAt: {
+    type: Date,
+    default: null,
+  },
+  gmailLastSyncAt: {
+    type: Date,
+    default: null,
+  },
+  /**
+   * Why the last Gmail operation failed, so the UI can say something better than
+   * "not connected" — which is indistinguishable from "never connected" and is
+   * exactly what left users re-authorising in a loop.
+   */
+  gmailLastError: {
+    code: { type: String, default: null },
+    message: { type: String, default: null },
+    at: { type: Date, default: null },
+  },
 }, { timestamps: true });
 
 // Pre-save hook to hash passwords before saving to the database

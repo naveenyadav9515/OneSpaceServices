@@ -102,11 +102,21 @@ const pendingTransactionSchema = new mongoose.Schema({
 /**
  * Compound unique index: one Gmail message can only create one pending transaction per user.
  * This is the DATABASE-LEVEL guarantee against duplicates.
- * The sparse option allows multiple null values (for manual entries without gmailMessageId).
+ *
+ * The partial filter restricts uniqueness to documents where gmailMessageId is a
+ * string, so manual entries (which leave it null) are unaffected.
+ *
+ * Note: `sparse` must NOT be combined with `partialFilterExpression` — MongoDB
+ * rejects that combination outright — and `$ne` is not a supported operator
+ * inside a partial filter. Either mistake makes the index fail to build, which
+ * silently removes the uniqueness guarantee this comment promises.
  */
 pendingTransactionSchema.index(
   { user: 1, gmailMessageId: 1 },
-  { unique: true, sparse: true, partialFilterExpression: { gmailMessageId: { $ne: null } } }
+  { unique: true, partialFilterExpression: { gmailMessageId: { $type: 'string' } } }
 );
+
+/** Supports the pending-list query: find({ user, status }).sort({ date: -1 }) */
+pendingTransactionSchema.index({ user: 1, status: 1, date: -1 });
 
 module.exports = mongoose.model('PendingTransaction', pendingTransactionSchema);

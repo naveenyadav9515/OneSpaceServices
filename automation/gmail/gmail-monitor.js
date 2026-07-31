@@ -15,6 +15,9 @@ const config = require('../../config/index');
 const { decryptSecret } = require('../../utils/crypto.util');
 const { extractEmailBody } = require('../parsers/base-parser');
 
+/** Safety cap on message-list pagination (100 messages per page). */
+const MAX_LIST_PAGES = 20;
+
 /**
  * Formats a Date object into Gmail query format (YYYY/MM/DD).
  * @param {Date} date
@@ -28,8 +31,12 @@ function formatGmailQueryDate(date) {
 }
 
 /**
- * Calculates the sync cutoff date (start of previous month in IST).
- * This ensures we look back far enough to catch late-arriving emails.
+ * Calculates the sync cutoff date — the earlier of:
+ *   a) start of the previous month in IST, and
+ *   b) now minus GMAIL_SYNC_LOOKBACK_DAYS.
+ *
+ * Taking the earlier of the two means the configured lookback can only ever
+ * widen the window, never silently narrow it below the month-based floor.
  * @returns {Date}
  */
 function getSyncCutoffDate() {
@@ -44,7 +51,13 @@ function getSyncCutoffDate() {
     year -= 1;
   }
 
-  return new Date(`${year}-${String(prevMonth + 1).padStart(2, '0')}-01T00:00:00.000+05:30`);
+  const startOfPrevMonth = new Date(`${year}-${String(prevMonth + 1).padStart(2, '0')}-01T00:00:00.000+05:30`);
+
+  const lookbackDays = config.app.gmailSyncLookbackDays;
+  if (!Number.isFinite(lookbackDays) || lookbackDays <= 0) return startOfPrevMonth;
+
+  const lookbackCutoff = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  return lookbackCutoff < startOfPrevMonth ? lookbackCutoff : startOfPrevMonth;
 }
 
 /**
@@ -72,6 +85,7 @@ function createOAuth2Client(user) {
 async function fetchEmailList(gmail, query) {
   let pageToken = null;
   let allMessages = [];
+  let pages = 0;
 
   do {
     const listParams = {
@@ -85,6 +99,12 @@ async function fetchEmailList(gmail, query) {
     const messages = response.data.messages || [];
     allMessages = allMessages.concat(messages);
     pageToken = response.data.nextPageToken || null;
+    pages++;
+
+    if (pages >= MAX_LIST_PAGES && pageToken) {
+      console.warn(`[GmailMonitor] Stopped paginating at ${MAX_LIST_PAGES} pages (${allMessages.length} messages). Narrow the sync window if this recurs.`);
+      break;
+    }
   } while (pageToken);
 
   return allMessages;
@@ -130,8 +150,7 @@ function buildQuery(senderEmails, cutoffDate) {
     return `after:${dateStr} from:${senderEmails[0]}`;
   }
   // Multiple senders: from:(addr1 OR addr2 OR addr3)
-  const fromClause = senderEmails.map(e => e).join(' OR ');
-  return `after:${dateStr} from:(${fromClause})`;
+  return `after:${dateStr} from:(${senderEmails.join(' OR ')})`;
 }
 
 module.exports = {

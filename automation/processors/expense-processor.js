@@ -9,6 +9,7 @@
 
 const PendingTransaction = require('../../models/PendingTransaction');
 const Expense = require('../../models/Expense');
+const { GENERIC_MERCHANT } = require('../parsers/base-parser');
 
 /**
  * Checks if a transaction is a duplicate.
@@ -37,7 +38,16 @@ async function isDuplicate(userId, transaction) {
     if (inExpenses) return true;
   }
 
-  // Strategy 2: Check by amount + merchant + same minute window
+  // Strategy 2: Check by amount + merchant + same minute window.
+  //
+  // Only safe with a real merchant name. When extraction fell back to the
+  // generic placeholder, this check would collapse two genuinely different
+  // same-amount transactions in the same minute into one — so we skip it.
+  // Such records still carry a gmailMessageId, so Strategy 1 covers them.
+  if (!transaction.merchant || transaction.merchant === GENERIC_MERCHANT) {
+    return false;
+  }
+
   const minuteStart = new Date(transaction.date);
   minuteStart.setSeconds(0, 0);
   const minuteEnd = new Date(minuteStart.getTime() + 59999);
@@ -63,11 +73,31 @@ async function isDuplicate(userId, transaction) {
 
 /**
  * Creates a PendingTransaction from a parsed transaction.
+ *
+ * Returns null (rather than throwing) when the unique index rejects the insert,
+ * which happens when a concurrent sync — e.g. the manual button racing a Pub/Sub
+ * push — created the same record first. That is a duplicate, not an error.
+ *
  * @param {string} userId - User's MongoDB ObjectId
  * @param {object} transaction - Parsed transaction data
- * @returns {Promise<object>} Created PendingTransaction document
+ * @returns {Promise<object|null>} Created PendingTransaction document, or null if already present
  */
 async function createPendingTransaction(userId, transaction) {
+  try {
+    return await createPendingTransactionUnsafe(userId, transaction);
+  } catch (err) {
+    if (err && err.code === 11000) return null;
+    throw err;
+  }
+}
+
+/**
+ * Performs the actual insert. Split out so the duplicate-key guard above stays legible.
+ * @param {string} userId
+ * @param {object} transaction
+ * @returns {Promise<object>}
+ */
+async function createPendingTransactionUnsafe(userId, transaction) {
   return PendingTransaction.create({
     user: userId,
     amount: transaction.amount,

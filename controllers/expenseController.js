@@ -308,27 +308,71 @@ exports.simulateAutoLog = async (req, res, next) => {
   }
 };
 
-// On-demand or On-load synchronization of emails (Alternative to Pub/Sub)
+/**
+ * @desc    On-demand synchronization of Gmail bank alerts (alternative to Pub/Sub)
+ * @route   POST /api/expenses/sync
+ * @access  Private
+ *
+ * Always responds 200 with a structured outcome so the client can distinguish
+ * "nothing new" from "not connected" from "your Google consent expired".
+ * Reporting every one of those as a bare success is what made a revoked token
+ * look identical to an empty inbox.
+ */
 exports.syncExpenses = async (req, res, next) => {
   try {
     const User = require('../models/User');
     const user = await User.findById(req.user.id).select('+googleRefreshToken');
-    
+
     if (!user) {
-      console.log('[SyncExpenses] User not found');
-      return res.status(200).json({ status: 'success', message: 'User not found', data: null });
+      return res.status(404).json({ status: 'error', message: 'User not found' });
     }
 
     console.log(`[SyncExpenses] User: ${user.email}, gmailConnected: ${user.gmailConnected}, hasRefreshToken: ${!!user.googleRefreshToken}`);
 
-    if (user.gmailConnected && user.googleRefreshToken) {
-      const engine = require('../automation/engine');
-      const stats = await engine.processUserEmails(user);
-      console.log(`[SyncExpenses] Engine stats:`, JSON.stringify(stats));
-      return res.status(200).json({ status: 'success', message: 'Sync complete', data: stats });
+    if (!user.gmailConnected || !user.googleRefreshToken) {
+      // Self-heal a half-connected account: flagged as connected but no token to use.
+      if (user.gmailConnected && !user.googleRefreshToken) {
+        await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
+        console.warn(`[SyncExpenses] ${user.email} was flagged connected with no refresh token — reset to disconnected.`);
+      }
+
+      return res.status(200).json({
+        status: 'success',
+        message: 'Gmail is not connected. Connect your Gmail account to sync bank alerts.',
+        data: { ok: false, reason: 'not_connected', created: 0, duplicates: 0, processed: 0 },
+      });
     }
-    
-    res.status(200).json({ status: 'success', message: 'Gmail not connected — sync skipped', data: null });
+
+    const engine = require('../automation/engine');
+    const stats = await engine.processUserEmails(user);
+    console.log('[SyncExpenses] Engine stats:', JSON.stringify(stats));
+
+    // Google consent is gone — stop pretending the integration is live.
+    if (stats.authExpired) {
+      await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
+      console.warn(`[SyncExpenses] Google credentials rejected for ${user.email}. Marked disconnected.`);
+      return res.status(200).json({
+        status: 'success',
+        message: 'Gmail access has expired. Please reconnect your Gmail account.',
+        data: { ...stats, reason: 'auth_expired' },
+      });
+    }
+
+    if (!stats.ok) {
+      return res.status(200).json({
+        status: 'success',
+        message: `Gmail sync failed: ${stats.error || 'unknown error'}`,
+        data: stats,
+      });
+    }
+
+    const message = stats.created > 0
+      ? `Added ${stats.created} transaction${stats.created === 1 ? '' : 's'} for review.`
+      : stats.processed > 0
+        ? 'No new transactions — everything found was already recorded.'
+        : 'No bank emails found in the sync window.';
+
+    return res.status(200).json({ status: 'success', message, data: stats });
   } catch (error) {
     console.error('[SyncExpenses] Error:', error);
     next(error);

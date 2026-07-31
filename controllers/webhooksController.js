@@ -39,19 +39,34 @@ const handleGmailPushNotification = async (req, res, next) => {
     }
 
     // ── 4. Find eligible user ──
+    // Match on the authorised mailbox first; fall back to the login email for
+    // accounts connected before `gmailAddress` was recorded.
     const user = await User.findOne({
-      email: emailAddress,
       gmailConnected: true,
       expenseAutomationEnabled: true,
+      $or: [
+        { gmailAddress: emailAddress.toLowerCase() },
+        { gmailAddress: null, email: emailAddress.toLowerCase() },
+      ],
     }).select('+googleRefreshToken');
 
     if (!user || !user.googleRefreshToken) {
+      console.log(`[Webhook] No eligible user for mailbox ${emailAddress}. Ignoring.`);
       return res.status(200).send('Ignored');
     }
 
     // ── 5. Delegate to Automation Engine ──
-    await engine.processUserEmails(user);
+    const stats = await engine.processUserEmails(user);
 
+    if (stats.authExpired) {
+      await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
+      console.warn(`[Webhook] Google credentials rejected for ${user.email}. Marked disconnected.`);
+    } else if (!stats.ok) {
+      console.error(`[Webhook] Sync failed for ${user.email}: ${stats.error}`);
+    }
+
+    // Always 200 — a non-2xx makes Pub/Sub redeliver, and none of these
+    // conditions are fixed by retrying.
     res.status(200).send('OK');
   } catch (error) {
     console.error('Webhook Error:', error);
