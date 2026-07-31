@@ -51,16 +51,33 @@ const MERCHANT_PATTERNS = [
 ];
 
 /**
- * Checks if an email subject indicates a debit transaction from Axis Bank.
+ * Checks if an email subject matches the specific Axis Bank debit alert pattern.
+ * Expected format: "INR 1.00 was debited from your A/c no. XX5482."
+ * Only the amount varies — the rest of the structure is fixed.
  * @param {string} subject - Email subject line
  * @returns {boolean}
  */
 function isRelevant(subject) {
-  return subject.toLowerCase().includes('debited');
+  return /INR\s+[\d,]+(?:\.\d{1,2})?\s+was\s+debited\s+from\s+your\s+A\/c/i.test(subject);
 }
 
 /**
- * Extracts the amount from the email body.
+ * Extracts the amount from the Axis Bank subject line.
+ * Subject format: "INR 1.00 was debited from your A/c no. XX5482."
+ * This is the PRIMARY extraction method — subject is plain text and always reliable.
+ * @param {string} subject - Email subject line
+ * @returns {number} Amount, or 0 if not found
+ */
+function extractAmountFromSubject(subject) {
+  const match = subject.match(/INR\s+([\d,]+(?:\.\d{1,2})?)\s+was\s+debited/i);
+  if (match && match[1]) {
+    return parseIndianAmount(match[1]);
+  }
+  return 0;
+}
+
+/**
+ * Extracts the amount from the email body (fallback).
  * @param {string} body - Email body text
  * @returns {number} Amount, or 0 if not found
  */
@@ -132,7 +149,12 @@ function extractDate(body, messageMetadata) {
  * @returns {object|null} Parsed transaction or null if parsing fails
  */
 function parse(subject, body, messageMetadata) {
-  const amount = extractAmount(body);
+  // Primary: extract amount from subject (most reliable — always plain text)
+  let amount = extractAmountFromSubject(subject);
+  // Fallback: extract from body if subject extraction fails
+  if (amount <= 0) {
+    amount = extractAmount(body);
+  }
   if (amount <= 0) return null;
 
   const merchant = extractMerchant(body);

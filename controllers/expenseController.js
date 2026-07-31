@@ -314,13 +314,23 @@ exports.syncExpenses = async (req, res, next) => {
     const User = require('../models/User');
     const user = await User.findById(req.user.id).select('+googleRefreshToken');
     
-    if (user && user.gmailConnected && user.googleRefreshToken) {
+    if (!user) {
+      console.log('[SyncExpenses] User not found');
+      return res.status(200).json({ status: 'success', message: 'User not found', data: null });
+    }
+
+    console.log(`[SyncExpenses] User: ${user.email}, gmailConnected: ${user.gmailConnected}, hasRefreshToken: ${!!user.googleRefreshToken}`);
+
+    if (user.gmailConnected && user.googleRefreshToken) {
       const engine = require('../automation/engine');
-      await engine.processUserEmails(user);
+      const stats = await engine.processUserEmails(user);
+      console.log(`[SyncExpenses] Engine stats:`, JSON.stringify(stats));
+      return res.status(200).json({ status: 'success', message: 'Sync complete', data: stats });
     }
     
-    res.status(200).json({ status: 'success', message: 'Sync complete' });
+    res.status(200).json({ status: 'success', message: 'Gmail not connected — sync skipped', data: null });
   } catch (error) {
+    console.error('[SyncExpenses] Error:', error);
     next(error);
   }
 };

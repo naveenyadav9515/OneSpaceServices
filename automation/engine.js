@@ -34,7 +34,7 @@ class AutomationEngine extends EventEmitter {
    * @returns {Promise<{processed: number, created: number, duplicates: number, errors: number}>}
    */
   async processUserEmails(user) {
-    const stats = { processed: 0, created: 0, duplicates: 0, errors: 0 };
+    const stats = { processed: 0, created: 0, duplicates: 0, errors: 0, fetchedEmails: [] };
 
     try {
       if (!user || !user.googleRefreshToken) {
@@ -55,6 +55,7 @@ class AutomationEngine extends EventEmitter {
       // ── 2. Build query and fetch email list ──
       const cutoffDate = getSyncCutoffDate();
       const query = buildQuery(senderEmails, cutoffDate);
+      console.log(`[AutomationEngine] Gmail query: "${query}" | Cutoff: ${cutoffDate.toISOString()}`);
       const messages = await fetchEmailList(gmail, query);
 
       console.log(`[AutomationEngine] Found ${messages.length} emails for user ${user.email}`);
@@ -66,6 +67,14 @@ class AutomationEngine extends EventEmitter {
 
           // ── 3a. Fetch full email content ──
           const email = await fetchEmailContent(gmail, msg.id);
+          console.log(`[AutomationEngine] Email ${msg.id}: subject="${email.subject}", from="${email.from}"`);
+          
+          stats.fetchedEmails.push({
+            id: msg.id,
+            subject: email.subject,
+            from: email.from,
+            date: email.metadata?.internalDate ? new Date(parseInt(email.metadata.internalDate)) : null
+          });
 
           // ── 3b. Find the right parser by sender email ──
           // Extract raw email address from "From" header (e.g., "Axis Bank <alerts@axis.bank.in>")
@@ -75,23 +84,27 @@ class AutomationEngine extends EventEmitter {
 
           if (!parser) {
             // No parser for this sender — skip silently
+            console.log(`[AutomationEngine] No parser found for sender: "${senderEmail}". Skipping.`);
             continue;
           }
 
           // ── 3c. Check if the email is relevant (e.g., is a debit alert) ──
           if (!parser.isRelevant(email.subject)) {
+            console.log(`[AutomationEngine] Email ${msg.id} not relevant (subject didn't match). Skipping.`);
             continue;
           }
 
           // ── 3d. Parse the email into a structured transaction ──
           const transaction = parser.parse(email.subject, email.body, email.metadata);
           if (!transaction) {
-            console.warn(`[AutomationEngine] Parser returned null for email ${msg.id}. Skipping.`);
+            console.warn(`[AutomationEngine] Parser returned null for email ${msg.id}. Amount extraction failed.`);
             continue;
           }
+          console.log(`[AutomationEngine] Parsed: amount=${transaction.amount}, merchant="${transaction.merchant}", date=${transaction.date}`);
 
           // Skip if parsed date falls before cutoff
           if (transaction.date < cutoffDate) {
+            console.log(`[AutomationEngine] Email ${msg.id} date ${transaction.date} before cutoff ${cutoffDate.toISOString()}. Skipping.`);
             continue;
           }
 
@@ -99,12 +112,14 @@ class AutomationEngine extends EventEmitter {
           const duplicate = await isDuplicate(user._id, transaction);
           if (duplicate) {
             stats.duplicates++;
+            console.log(`[AutomationEngine] Email ${msg.id} is a duplicate. Skipping.`);
             continue;
           }
 
           // ── 3f. Create pending transaction ──
           const pending = await createPendingTransaction(user._id, transaction);
           stats.created++;
+          console.log(`[AutomationEngine] ✅ Created pending transaction: ${pending._id} (₹${transaction.amount})`);
 
           // Emit event for future modules (push notifications, etc.)
           this.emit('transaction:created', { user, transaction: pending });
