@@ -12,20 +12,46 @@ const User = require('../models/User');
 /**
  * Records why Gmail last failed, so the settings panel can explain itself
  * instead of showing a bare "not connected".
+ *
+ * When the failure carries a cooldown (`retryAfterMs`), the deadline is stored
+ * too — that is what stops the next Pub/Sub push, seconds later, from spending
+ * another slice of an already-exhausted quota.
  * @param {string} userId
- * @param {{code: string, message: string}|null} failure null clears the stored error
+ * @param {{code: string, message: string, retryAfterMs?: number|null}|null} failure null clears the stored error
  * @returns {Promise<void>}
  */
 async function recordGmailError(userId, failure) {
   try {
-    await User.findByIdAndUpdate(userId, {
+    const update = {
       gmailLastError: failure
         ? { code: failure.code, message: failure.message, at: new Date() }
         : { code: null, message: null, at: null },
-    });
+    };
+
+    if (failure?.retryAfterMs > 0) {
+      update.gmailRetryAfter = new Date(Date.now() + failure.retryAfterMs);
+    } else if (!failure) {
+      update.gmailRetryAfter = null;
+    }
+
+    await User.findByIdAndUpdate(userId, update);
   } catch (err) {
     console.error('[GmailState] Could not record Gmail error state:', err.message);
   }
+}
+
+/**
+ * How much longer we must leave Google alone for this user, in milliseconds.
+ *
+ * Reads the stored deadline off the user document the caller already loaded —
+ * deliberately no extra query, since this runs on the hot path of every push.
+ * @param {object} user
+ * @returns {number} 0 when there is no active cooldown
+ */
+function getGmailCooldownRemainingMs(user) {
+  const until = user?.gmailRetryAfter ? new Date(user.gmailRetryAfter).getTime() : 0;
+  if (!until) return 0;
+  return Math.max(0, until - Date.now());
 }
 
 /**
@@ -39,9 +65,62 @@ async function recordGmailSyncSuccess(userId) {
     await User.findByIdAndUpdate(userId, {
       gmailLastSyncAt: new Date(),
       gmailLastError: { code: null, message: null, at: null },
+      gmailRetryAfter: null,
     });
   } catch (err) {
     console.error('[GmailState] Could not record Gmail sync success:', err.message);
+  }
+}
+
+/**
+ * How long a sync lock is honoured before another run may steal it.
+ *
+ * Must exceed the longest a healthy sync can take (the engine caps each run at
+ * MAX_FETCHES_PER_SYNC messages, so seconds) with a wide margin, and must be
+ * short enough that a process killed mid-sync does not lock the user out for
+ * long. Render restarts containers freely, so this case is routine, not rare.
+ */
+const SYNC_LOCK_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Claims the sync lock for a user, if it is free or has gone stale.
+ *
+ * The find-and-update is a single atomic operation on purpose: reading the lock
+ * and then writing it would leave a window where two processes both see it free.
+ *
+ * @param {string} userId
+ * @returns {Promise<boolean>} true when this caller now holds the lock
+ */
+async function acquireSyncLock(userId) {
+  const staleBefore = new Date(Date.now() - SYNC_LOCK_TTL_MS);
+
+  const claimed = await User.findOneAndUpdate(
+    {
+      _id: userId,
+      $or: [
+        { gmailSyncLockedAt: null },
+        { gmailSyncLockedAt: { $exists: false } },
+        { gmailSyncLockedAt: { $lt: staleBefore } },
+      ],
+    },
+    { $set: { gmailSyncLockedAt: new Date() } },
+    { new: true },
+  ).select('_id').lean();
+
+  return Boolean(claimed);
+}
+
+/**
+ * Releases the sync lock. Best-effort: if this fails the lock still expires on
+ * its own after the TTL, so a sync can never be blocked forever.
+ * @param {string} userId
+ * @returns {Promise<void>}
+ */
+async function releaseSyncLock(userId) {
+  try {
+    await User.findByIdAndUpdate(userId, { $set: { gmailSyncLockedAt: null } });
+  } catch (err) {
+    console.warn(`[GmailState] Could not release the sync lock (it expires in ${SYNC_LOCK_TTL_MS / 60000}m anyway): ${err.message}`);
   }
 }
 
@@ -60,11 +139,16 @@ function failureFromStats(stats) {
     code: stats.reason || 'gmail_error',
     message: stats.error || 'Gmail sync failed.',
     fatal: Boolean(stats.authExpired),
+    retryAfterMs: null,
   };
 }
 
 module.exports = {
+  SYNC_LOCK_TTL_MS,
   recordGmailError,
   recordGmailSyncSuccess,
+  getGmailCooldownRemainingMs,
+  acquireSyncLock,
+  releaseSyncLock,
   failureFromStats,
 };

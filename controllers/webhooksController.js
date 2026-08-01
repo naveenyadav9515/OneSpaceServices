@@ -8,7 +8,8 @@
 const User = require('../models/User');
 const config = require('../config/index');
 const engine = require('../automation/engine');
-const { recordGmailError, recordGmailSyncSuccess, failureFromStats } = require('../utils/gmail-state.util');
+const { recordGmailError, recordGmailSyncSuccess, failureFromStats, getGmailCooldownRemainingMs } = require('../utils/gmail-state.util');
+const { invalidateOAuth2Client } = require('../automation/gmail/gmail-monitor');
 
 /**
  * @desc    Handle incoming Google Cloud Pub/Sub Push Notifications for Gmail
@@ -56,7 +57,19 @@ const handleGmailPushNotification = async (req, res, next) => {
       return res.status(200).send('Ignored');
     }
 
-    // ── 5. Delegate to Automation Engine ──
+    // ── 5. Respect an active cooldown ──
+    //
+    // Gmail pushes a notification for *any* inbox change, so a busy mailbox
+    // reaches this line dozens of times an hour. Running a sync for each of them
+    // while Google is already refusing on quota grounds is what keeps the block
+    // alive. Bail out here — cheaply, before the engine loads anything.
+    const cooldownMs = getGmailCooldownRemainingMs(user);
+    if (cooldownMs > 0) {
+      console.warn(`[Webhook] Ignoring push for ${user.email} — Google cooldown has ${Math.ceil(cooldownMs / 1000)}s left.`);
+      return res.status(200).send('Cooling down');
+    }
+
+    // ── 6. Delegate to Automation Engine ──
     const stats = await engine.processUserEmails(user);
 
     if (!stats.ok) {
@@ -65,6 +78,7 @@ const handleGmailPushNotification = async (req, res, next) => {
 
       // Same rule as the manual sync: only a dead credential may disconnect.
       if (failure.fatal) {
+        invalidateOAuth2Client(user._id);
         await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
         console.warn(`[Webhook] Google credentials rejected for ${user.email} (${failure.code}). Marked disconnected.`);
       } else {

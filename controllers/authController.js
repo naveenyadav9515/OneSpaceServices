@@ -360,6 +360,9 @@ exports.connectGmail = async (req, res, next) => {
       expenseAutomationEnabled: true,
       gmailConnectedAt: new Date(),
       gmailLastError: { code: null, message: null, at: null },
+      // A reconnect is an explicit "start over". Carrying a cooldown across it
+      // would silently skip the initial sync and look like the connect failed.
+      gmailRetryAfter: null,
       ...(gmailAddress ? { gmailAddress } : {}),
       ...(tokens.scope ? { gmailScopes: String(tokens.scope).split(/\s+/) } : {}),
     };

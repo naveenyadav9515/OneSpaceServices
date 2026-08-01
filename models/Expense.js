@@ -49,9 +49,27 @@ const expenseSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+/**
+ * One Gmail message can only ever become one expense per user.
+ *
+ * This previously read `{ unique: true, sparse: true, partialFilterExpression:
+ * { gmailMessageId: { $ne: null } } }`, which is invalid twice over: MongoDB
+ * rejects `sparse` combined with `partialFilterExpression`, and `$ne` is not a
+ * supported operator inside a partial filter. The index therefore never built,
+ * and the uniqueness this guards was not being enforced at all — approving the
+ * same pending transaction twice, or two clients racing the same approval,
+ * silently produced duplicate expenses.
+ *
+ * `$type: 'string'` is the form that actually works, and it leaves manual
+ * entries (gmailMessageId null) out of the constraint. Same as the equivalent
+ * index on PendingTransaction — see the note there.
+ */
 expenseSchema.index(
   { user: 1, gmailMessageId: 1 },
-  { unique: true, sparse: true, partialFilterExpression: { gmailMessageId: { $ne: null } } }
+  { unique: true, partialFilterExpression: { gmailMessageId: { $type: 'string' } } }
 );
+
+/** Supports the summary aggregations: find({ user, date: { $gte, $lte } }) */
+expenseSchema.index({ user: 1, date: -1 });
 
 module.exports = mongoose.model('Expense', expenseSchema);

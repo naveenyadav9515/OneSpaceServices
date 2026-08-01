@@ -95,6 +95,34 @@ const userSchema = new mongoose.Schema({
     message: { type: String, default: null },
     at: { type: Date, default: null },
   },
+  /**
+   * Do not call Google for this user before this time.
+   *
+   * Set from Google's `Retry-After`, or from a default cooldown when it sends
+   * none. Without it, a rate-limited account kept syncing on every Pub/Sub push
+   * and on every press of the Refresh button — each rejected call counting
+   * against the same quota and pushing the recovery further out. Cleared on the
+   * first successful sync.
+   */
+  gmailRetryAfter: {
+    type: Date,
+    default: null,
+  },
+  /**
+   * Held while a sync is running for this user; null when idle.
+   *
+   * The engine also keeps an in-process guard, but that only covers one Node
+   * process. A restart mid-sync, or a second instance, could still run a
+   * concurrent scan of the same mailbox and double the quota spend. This claim
+   * lives in the database, so it holds across both.
+   *
+   * Treated as stale (and reclaimable) once older than the engine's lock TTL —
+   * otherwise a process that dies mid-sync would block the user permanently.
+   */
+  gmailSyncLockedAt: {
+    type: Date,
+    default: null,
+  },
 }, { timestamps: true });
 
 // Pre-save hook to hash passwords before saving to the database

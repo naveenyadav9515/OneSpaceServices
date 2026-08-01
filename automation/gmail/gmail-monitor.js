@@ -14,9 +14,16 @@ const { google } = require('googleapis');
 const config = require('../../config/index');
 const { decryptSecret } = require('../../utils/crypto.util');
 const { extractEmailBody } = require('../parsers/base-parser');
+const { classifyGoogleError } = require('../../utils/google-error.util');
 
 /** Safety cap on message-list pagination (100 messages per page). */
 const MAX_LIST_PAGES = 20;
+
+/** Attempts per Gmail call, including the first. */
+const MAX_ATTEMPTS = 3;
+
+/** Base delay for the exponential backoff between those attempts. */
+const BACKOFF_BASE_MS = 1000;
 
 /**
  * Formats a Date object into Gmail query format (YYYY/MM/DD).
@@ -61,19 +68,124 @@ function getSyncCutoffDate() {
 }
 
 /**
- * Creates an authenticated OAuth2 client using the user's refresh token.
+ * Cache of live OAuth2 clients, keyed by user id.
+ *
+ * A fresh `OAuth2Client` holding only a refresh token has to redeem it at
+ * `oauth2.googleapis.com/token` before the first API call. Building a new one per
+ * sync — which every entry point used to do — meant one token exchange per sync,
+ * per watch renewal, per Pub/Sub push. Google throttles refresh-token redemptions
+ * per (client, user) and answers 429 well before Gmail itself would, so the sync
+ * was rate-limited before it read a single message.
+ *
+ * Reusing the instance lets google-auth-library hold the access token for its
+ * full hour and refresh it only when it actually expires.
+ * @type {Map<string, {client: object, refreshToken: string, usedAt: number}>}
+ */
+const oauthClientCache = new Map();
+
+/**
+ * Most cached clients to keep.
+ *
+ * An unbounded cache is a slow memory leak: one entry per user who has ever
+ * synced, each holding an access token, never released. The eviction order is
+ * least-recently-used, and a miss costs only the token exchange this cache
+ * exists to avoid — so a small ceiling is safe.
+ */
+const MAX_CACHED_CLIENTS = 500;
+
+/**
+ * Drop the least-recently-used entries until the cache is within its ceiling.
+ * Map preserves insertion order and `createOAuth2Client` re-inserts on every
+ * hit, so the oldest key is always the least recently used.
+ */
+function evictStaleClients() {
+  while (oauthClientCache.size > MAX_CACHED_CLIENTS) {
+    const oldest = oauthClientCache.keys().next().value;
+    oauthClientCache.delete(oldest);
+  }
+}
+
+/**
+ * Creates — or reuses — an authenticated OAuth2 client for this user.
+ *
+ * The cached entry is discarded when the stored refresh token changes, so a
+ * reconnect never keeps talking to Google with the credential it replaced.
  * @param {object} user - User document with googleRefreshToken
  * @returns {object} Authenticated OAuth2 client
  */
 function createOAuth2Client(user) {
+  const refreshToken = decryptSecret(user.googleRefreshToken);
+  const key = String(user._id || user.id || '');
+
+  const cached = key ? oauthClientCache.get(key) : null;
+  if (cached && cached.refreshToken === refreshToken) {
+    // Re-insert to mark it most-recently-used for the eviction order.
+    oauthClientCache.delete(key);
+    oauthClientCache.set(key, { ...cached, usedAt: Date.now() });
+    return cached.client;
+  }
+
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
   );
-  oauth2Client.setCredentials({
-    refresh_token: decryptSecret(user.googleRefreshToken),
-  });
+  oauth2Client.setCredentials({ refresh_token: refreshToken });
+
+  if (key) {
+    oauthClientCache.set(key, { client: oauth2Client, refreshToken, usedAt: Date.now() });
+    evictStaleClients();
+  }
   return oauth2Client;
+}
+
+/**
+ * Drops a user's cached client. Call on disconnect and on any fatal credential
+ * failure — otherwise a revoked token keeps its cached access token until that
+ * token expires, and the user sees "connected" behaviour from a dead grant.
+ * @param {string} userId
+ */
+function invalidateOAuth2Client(userId) {
+  oauthClientCache.delete(String(userId));
+}
+
+/** @param {number} ms @returns {Promise<void>} */
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Runs a Gmail call, retrying transient failures with exponential backoff.
+ *
+ * Only retries what Google says is worth retrying, and honours `Retry-After`
+ * when it sends one. A rate limit is deliberately NOT retried here: once Google
+ * is refusing on quota grounds, retrying inside the same sync is what deepens
+ * the block. The engine aborts and the cooldown keeps us away instead.
+ *
+ * @template T
+ * @param {() => Promise<T>} call
+ * @param {string} label used only in the log line
+ * @returns {Promise<T>}
+ */
+async function withGoogleRetry(call, label) {
+  let lastErr;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await call();
+    } catch (err) {
+      lastErr = err;
+      const failure = classifyGoogleError(err);
+
+      if (!failure.retryable || failure.code === 'rate_limited' || attempt === MAX_ATTEMPTS) throw err;
+
+      // Full jitter — a fixed backoff makes concurrent syncs retry in lockstep,
+      // which reproduces the burst that caused the failure.
+      const ceiling = failure.retryAfterMs ?? BACKOFF_BASE_MS * 2 ** (attempt - 1);
+      const delay = Math.round(Math.random() * ceiling);
+      console.warn(`[GmailMonitor] ${label} failed (${failure.code}), retry ${attempt}/${MAX_ATTEMPTS - 1} in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+
+  throw lastErr;
 }
 
 /**
@@ -95,7 +207,10 @@ async function fetchEmailList(gmail, query) {
     };
     if (pageToken) listParams.pageToken = pageToken;
 
-    const response = await gmail.users.messages.list(listParams);
+    const response = await withGoogleRetry(
+      () => gmail.users.messages.list(listParams),
+      `messages.list page ${pages + 1}`,
+    );
     const messages = response.data.messages || [];
     allMessages = allMessages.concat(messages);
     pageToken = response.data.nextPageToken || null;
@@ -117,11 +232,10 @@ async function fetchEmailList(gmail, query) {
  * @returns {Promise<object>} { subject, body, metadata: { id, internalDate } }
  */
 async function fetchEmailContent(gmail, messageId) {
-  const msgData = await gmail.users.messages.get({
-    userId: 'me',
-    id: messageId,
-    format: 'full',
-  });
+  const msgData = await withGoogleRetry(
+    () => gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' }),
+    `messages.get ${messageId}`,
+  );
 
   const payload = msgData.data.payload;
   const subjectHeader = payload.headers?.find(h => h.name.toLowerCase() === 'subject');
@@ -157,6 +271,8 @@ module.exports = {
   formatGmailQueryDate,
   getSyncCutoffDate,
   createOAuth2Client,
+  invalidateOAuth2Client,
+  withGoogleRetry,
   fetchEmailList,
   fetchEmailContent,
   buildQuery,

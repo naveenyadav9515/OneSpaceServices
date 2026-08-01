@@ -238,43 +238,80 @@ exports.getPendingTransactions = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    Approve a detected transaction into an expense, or reject it
+ * @route   POST /api/expenses/pending/:id
+ * @access  Private
+ *
+ * The status change is a conditional update rather than read-then-write, so two
+ * clients approving the same row (a double tap, or two devices) cannot both pass
+ * the check. Whoever loses the race is told it is already handled.
+ */
 exports.processPendingTransaction = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { action, ...expenseData } = req.body; // action: 'approve' or 'ignore'
 
-    const pending = await PendingTransaction.findOne({ _id: id, user: req.user.id });
+    if (action !== 'approve' && action !== 'ignore') {
+      return res.status(400).json({ status: 'error', message: 'Invalid action' });
+    }
+
+    const nextStatus = action === 'approve' ? 'Approved' : 'Rejected';
+
+    // Claim the row: only a transaction still Pending can be acted on.
+    const pending = await PendingTransaction.findOneAndUpdate(
+      { _id: id, user: req.user.id, status: 'Pending' },
+      { $set: { status: nextStatus } },
+      { new: true },
+    );
+
     if (!pending) {
-      return res.status(404).json({ status: 'error', message: 'Pending transaction not found' });
+      // Either it never existed or someone already dealt with it. Distinguish
+      // the two so a double tap does not look like a missing record.
+      const exists = await PendingTransaction.exists({ _id: id, user: req.user.id });
+      return exists
+        ? res.status(409).json({ status: 'error', message: 'This transaction has already been reviewed.' })
+        : res.status(404).json({ status: 'error', message: 'Pending transaction not found' });
     }
 
     if (action === 'ignore') {
-      pending.status = 'Rejected';
-      await pending.save();
       return res.status(200).json({ status: 'success', message: 'Transaction ignored' });
     }
 
-    if (action === 'approve') {
-      pending.status = 'Approved';
-      await pending.save();
-
-      // Create actual expense
+    try {
       const expense = await Expense.create({
         user: req.user.id,
-        amount: expenseData.amount || pending.amount,
+        amount: expenseData.amount ?? pending.amount,
         merchant: expenseData.merchant || pending.merchant,
         category: expenseData.category || pending.category,
         paymentMethod: expenseData.paymentMethod || pending.paymentMethod,
         date: pending.date,
         tags: expenseData.tags || pending.tags,
         notes: expenseData.notes || pending.notes,
-        gmailMessageId: pending.gmailMessageId
+        gmailMessageId: pending.gmailMessageId,
       });
 
       return res.status(201).json({ status: 'success', data: expense });
-    }
+    } catch (createErr) {
+      // The expense for this Gmail message already exists — an earlier approval
+      // got as far as creating it. The row is genuinely approved, so leave the
+      // status alone and return what is already recorded.
+      if (createErr?.code === 11000 && pending.gmailMessageId) {
+        const existing = await Expense.findOne({ user: req.user.id, gmailMessageId: pending.gmailMessageId });
+        if (existing) return res.status(200).json({ status: 'success', data: existing });
+      }
 
-    res.status(400).json({ status: 'error', message: 'Invalid action' });
+      // Anything else (a validation failure on the edited amount, say) means no
+      // expense was written. Marking the transaction Approved anyway would drop
+      // it from the pending list with nothing to show for it — the user would
+      // simply lose the record. Put it back so it can be reviewed again.
+      await PendingTransaction.findOneAndUpdate(
+        { _id: id, user: req.user.id, status: 'Approved' },
+        { $set: { status: 'Pending' } },
+      );
+      console.error(`[Expenses] Approval failed for pending ${id}; restored to Pending:`, createErr.message);
+      throw createErr;
+    }
   } catch (error) {
     next(error);
   }
@@ -356,6 +393,8 @@ exports.syncExpenses = async (req, res, next) => {
       // Rate limits, a disabled Gmail API, and network blips are transient —
       // disconnecting on those is what forced users into a reconnect loop.
       if (failure.fatal) {
+        const { invalidateOAuth2Client } = require('../automation/gmail/gmail-monitor');
+        invalidateOAuth2Client(user._id);
         await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
         console.warn(`[SyncExpenses] Google credentials rejected for ${user.email} (${failure.code}). Marked disconnected.`);
       } else {
@@ -371,9 +410,14 @@ exports.syncExpenses = async (req, res, next) => {
 
     await recordGmailSyncSuccess(user._id);
 
+    // `processed` now counts only messages this run actually downloaded — anything
+    // resolved by an earlier sync is filtered out before Gmail is called. Reading
+    // "nothing new" off `processed` alone would therefore report a mailbox full of
+    // already-recorded alerts as an empty one.
+    const seen = stats.processed + (stats.skipped?.alreadySynced || 0);
     const message = stats.created > 0
       ? `Added ${stats.created} transaction${stats.created === 1 ? '' : 's'} for review.`
-      : stats.processed > 0
+      : seen > 0
         ? 'No new transactions — everything found was already recorded.'
         : 'No bank emails found in the sync window.';
 
@@ -436,11 +480,14 @@ exports.updateAutomationSettings = async (req, res, next) => {
       return res.status(404).json({ status: 'error', message: 'User not found' });
     }
 
-    // If watch activation is needed when enabling automation
+    // Register push notifications only when this user has no current watch.
+    // Re-registering on every settings save spent a `users.watch` call per click
+    // to replace a subscription that was already live.
     if (user.gmailConnected && user.expenseAutomationEnabled) {
       try {
-        const { activateWatch } = require('../automation/gmail/gmail-watch-manager');
-        await activateWatch(user);
+        const { ensureWatch } = require('../automation/gmail/gmail-watch-manager');
+        const registered = await ensureWatch(user);
+        if (registered) console.log(`[Gmail Setup] Registered push notifications for ${user.email}`);
       } catch (watchErr) {
         console.error(`[Gmail Setup] Failed to re-activate push notifications for ${user.email}:`, watchErr.message);
       }
@@ -470,11 +517,17 @@ exports.disconnectGmail = async (req, res, next) => {
     const User = require('../models/User');
     const { OAuth2Client } = require('google-auth-library');
     const { decryptSecret } = require('../utils/crypto.util');
+    const { invalidateOAuth2Client } = require('../automation/gmail/gmail-monitor');
 
     const user = await User.findById(req.user.id).select('+googleRefreshToken');
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'User not found' });
     }
+
+    // Drop the cached client first. Its access token stays valid for up to an
+    // hour after revocation, so leaving it in place lets a disconnected account
+    // keep syncing until that token happens to expire.
+    invalidateOAuth2Client(user._id);
 
     // Try to revoke the token with Google
     if (user.googleRefreshToken) {
@@ -500,6 +553,7 @@ exports.disconnectGmail = async (req, res, next) => {
     user.expenseAutomationBanks = [];
     user.gmailWatchExpiry = undefined;
     user.gmailHistoryId = undefined;
+    user.gmailRetryAfter = null;
     await user.save();
 
     res.status(200).json({

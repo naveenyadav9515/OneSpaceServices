@@ -9,7 +9,74 @@
 
 const PendingTransaction = require('../../models/PendingTransaction');
 const Expense = require('../../models/Expense');
+const GmailSyncedMessage = require('../../models/GmailSyncedMessage');
 const { GENERIC_MERCHANT } = require('../parsers/base-parser');
+
+/**
+ * Narrows a batch of Gmail message IDs down to the ones we have never resolved.
+ *
+ * This runs *before* any `messages.get`, which is the whole point: deduplication
+ * used to happen after the download, so every sync paid full Gmail quota for
+ * mail it was about to discard as a duplicate.
+ *
+ * Three sources are consulted, not just the ledger, so the first sync after this
+ * change already skips everything previously recorded instead of re-fetching the
+ * entire window once to rebuild the ledger from scratch.
+ *
+ * @param {string} userId
+ * @param {string[]} messageIds
+ * @returns {Promise<string[]>} the subset that still needs fetching, input order preserved
+ */
+async function filterUnprocessedMessageIds(userId, messageIds) {
+  if (!messageIds.length) return [];
+
+  const [ledger, pending, expenses] = await Promise.all([
+    GmailSyncedMessage.find({ user: userId, messageId: { $in: messageIds } }).select('messageId').lean(),
+    PendingTransaction.find({ user: userId, gmailMessageId: { $in: messageIds } }).select('gmailMessageId').lean(),
+    Expense.find({ user: userId, gmailMessageId: { $in: messageIds } }).select('gmailMessageId').lean(),
+  ]);
+
+  const seen = new Set([
+    ...ledger.map(d => d.messageId),
+    ...pending.map(d => d.gmailMessageId),
+    ...expenses.map(d => d.gmailMessageId),
+  ]);
+
+  return messageIds.filter(id => !seen.has(id));
+}
+
+/**
+ * Records the engine's verdict for messages it has finished with.
+ *
+ * Best-effort: a ledger write that fails costs us a re-fetch next sync, which is
+ * strictly better than failing a sync that otherwise succeeded. Duplicate-key
+ * errors are expected whenever two syncs overlap and are not worth reporting.
+ *
+ * @param {string} userId
+ * @param {Array<{id: string, outcome: string}>} entries
+ * @returns {Promise<void>}
+ */
+async function recordProcessedMessages(userId, entries) {
+  if (!entries.length) return;
+
+  try {
+    await GmailSyncedMessage.bulkWrite(
+      entries.map(({ id, outcome }) => ({
+        updateOne: {
+          filter: { user: userId, messageId: id },
+          update: { $set: { outcome: outcome || '', syncedAt: new Date() } },
+          upsert: true,
+        },
+      })),
+      { ordered: false },
+    );
+  } catch (err) {
+    const writeErrors = err?.writeErrors || [];
+    const allDuplicates = writeErrors.length > 0 && writeErrors.every(e => (e.err?.code ?? e.code) === 11000);
+    if (err?.code === 11000 || allDuplicates) return;
+    console.warn(`[ExpenseProcessor] Could not update the Gmail message ledger: ${err.message}`);
+  }
+}
 
 /**
  * Checks if a transaction is a duplicate.
@@ -120,4 +187,6 @@ async function createPendingTransactionUnsafe(userId, transaction) {
 module.exports = {
   isDuplicate,
   createPendingTransaction,
+  filterUnprocessedMessageIds,
+  recordProcessedMessages,
 };
