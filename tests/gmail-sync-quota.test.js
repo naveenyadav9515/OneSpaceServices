@@ -220,6 +220,46 @@ describe('rate-limit classification', () => {
     expect(failure.retryAfterMs).toBe(90000);
   });
 
+  it('reads the deadline Gmail embeds in the message when it sends no header', () => {
+    // Gmail's real per-user 429 sends no Retry-After header at all — the
+    // deadline is only in the text. Observed verbatim in production.
+    const until = new Date(Date.now() + 14 * 60 * 1000).toISOString();
+    const failure = classifyGoogleError({
+      message: `User-rate limit exceeded.  Retry after ${until}`,
+      response: {
+        status: 429,
+        data: { error: { code: 429, message: `User-rate limit exceeded.  Retry after ${until}`,
+          errors: [{ reason: 'rateLimitExceeded' }] } },
+      },
+    });
+
+    expect(failure.code).toBe('rate_limited');
+    // Within a second of the stated deadline, not the 5-minute default guess.
+    expect(failure.retryAfterMs).toBeGreaterThan(13.9 * 60 * 1000);
+    expect(failure.retryAfterMs).toBeLessThan(14.1 * 60 * 1000);
+  });
+
+  it('ignores an embedded deadline that has already passed', () => {
+    const past = new Date(Date.now() - 60 * 1000).toISOString();
+    const failure = classifyGoogleError({
+      message: `User-rate limit exceeded.  Retry after ${past}`,
+      response: { status: 429, data: {} },
+    });
+
+    // Falls through to the default rather than returning a negative wait.
+    expect(failure.retryAfterMs).toBe(5 * 60 * 1000);
+  });
+
+  it('prefers the Retry-After header over a deadline in the message', () => {
+    const far = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const failure = classifyGoogleError({
+      message: `Rate limited. Retry after ${far}`,
+      response: { status: 429, headers: { 'retry-after': '45' }, data: {} },
+    });
+
+    expect(failure.retryAfterMs).toBe(45000);
+  });
+
   it('falls back to a default cooldown when Google sends no hint', () => {
     const failure = classifyGoogleError({
       message: 'User Rate Limit Exceeded',

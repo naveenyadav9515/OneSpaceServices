@@ -30,18 +30,27 @@ const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_COOLDOWN_MS = 60 * 60 * 1000;
 
 /**
- * Reads Google's `Retry-After` hint, in milliseconds.
+ * Converts an absolute deadline into a delay from now, bounded.
+ * @param {number} until epoch milliseconds
+ * @returns {number|null} null when the deadline has already passed
+ */
+function deadlineToDelay(until) {
+  const delta = until - Date.now();
+  return delta <= 0 ? null : Math.min(delta, MAX_COOLDOWN_MS);
+}
+
+/**
+ * Reads Google's `Retry-After` header, in milliseconds.
  *
  * Two shapes have to be handled: Gaxios 7 exposes `response.headers` as a fetch
  * `Headers` instance (get-only), while older paths and hand-built test doubles
- * use a plain object. Reading only one of them silently loses the hint and we
- * fall back to guessing.
+ * use a plain object. Reading only one of them silently loses the hint.
  *
  * The value is either a delta in seconds or an HTTP date.
  * @param {any} err
- * @returns {number|null} milliseconds to wait, or null when Google gave no hint
+ * @returns {number|null}
  */
-function extractRetryAfterMs(err) {
+function retryAfterFromHeader(err) {
   const headers = err?.response?.headers;
   if (!headers) return null;
 
@@ -56,9 +65,45 @@ function extractRetryAfterMs(err) {
   }
 
   const until = Date.parse(String(raw));
-  if (Number.isNaN(until)) return null;
-  const delta = until - Date.now();
-  return delta <= 0 ? null : Math.min(delta, MAX_COOLDOWN_MS);
+  return Number.isNaN(until) ? null : deadlineToDelay(until);
+}
+
+/**
+ * Reads the deadline Gmail embeds in the error *text*.
+ *
+ * Gmail's 429 for a per-user rate limit sends no `Retry-After` header at all.
+ * It puts the deadline in the message instead:
+ *
+ *   "User-rate limit exceeded.  Retry after 2026-08-01T18:41:37.386Z"
+ *
+ * Reading only the header meant discarding an exact deadline in favour of a
+ * five-minute guess — which is either a needless wait or, worse, too short.
+ * Retrying early against a moving-window limit counts against that same window
+ * and pushes the deadline further out, which is how a brief rate limit turns
+ * into one that lasts all day.
+ *
+ * @param {any} err
+ * @returns {number|null}
+ */
+function retryAfterFromMessage(err) {
+  const text = `${err?.message || ''} ${err?.response?.data?.error?.message || ''}`;
+  const match = text.match(/retry\s+after\s+(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)/i);
+  if (!match) return null;
+
+  const until = Date.parse(match[1]);
+  return Number.isNaN(until) ? null : deadlineToDelay(until);
+}
+
+/**
+ * How long Google wants us to wait, in milliseconds.
+ *
+ * Prefers the header, then the deadline embedded in the message. Returns null
+ * when Google offered neither, leaving the caller to apply its own default.
+ * @param {any} err
+ * @returns {number|null}
+ */
+function extractRetryAfterMs(err) {
+  return retryAfterFromHeader(err) ?? retryAfterFromMessage(err);
 }
 
 /**
