@@ -8,6 +8,7 @@
 const User = require('../models/User');
 const config = require('../config/index');
 const engine = require('../automation/engine');
+const { recordGmailError, recordGmailSyncSuccess, failureFromStats } = require('../utils/gmail-state.util');
 
 /**
  * @desc    Handle incoming Google Cloud Pub/Sub Push Notifications for Gmail
@@ -58,11 +59,19 @@ const handleGmailPushNotification = async (req, res, next) => {
     // ── 5. Delegate to Automation Engine ──
     const stats = await engine.processUserEmails(user);
 
-    if (stats.authExpired) {
-      await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
-      console.warn(`[Webhook] Google credentials rejected for ${user.email}. Marked disconnected.`);
-    } else if (!stats.ok) {
-      console.error(`[Webhook] Sync failed for ${user.email}: ${stats.error}`);
+    if (!stats.ok) {
+      const failure = failureFromStats(stats);
+      await recordGmailError(user._id, failure);
+
+      // Same rule as the manual sync: only a dead credential may disconnect.
+      if (failure.fatal) {
+        await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
+        console.warn(`[Webhook] Google credentials rejected for ${user.email} (${failure.code}). Marked disconnected.`);
+      } else {
+        console.error(`[Webhook] Sync failed for ${user.email} (${failure.code}): ${failure.message}`);
+      }
+    } else {
+      await recordGmailSyncSuccess(user._id);
     }
 
     // Always 200 — a non-2xx makes Pub/Sub redeliver, and none of these

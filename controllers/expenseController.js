@@ -344,27 +344,32 @@ exports.syncExpenses = async (req, res, next) => {
     }
 
     const engine = require('../automation/engine');
+    const { recordGmailError, recordGmailSyncSuccess, failureFromStats } = require('../utils/gmail-state.util');
     const stats = await engine.processUserEmails(user);
     console.log('[SyncExpenses] Engine stats:', JSON.stringify(stats));
 
-    // Google consent is gone — stop pretending the integration is live.
-    if (stats.authExpired) {
-      await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
-      console.warn(`[SyncExpenses] Google credentials rejected for ${user.email}. Marked disconnected.`);
+    if (!stats.ok) {
+      const failure = failureFromStats(stats);
+      await recordGmailError(user._id, failure);
+
+      // Only a genuinely dead credential justifies tearing down the connection.
+      // Rate limits, a disabled Gmail API, and network blips are transient —
+      // disconnecting on those is what forced users into a reconnect loop.
+      if (failure.fatal) {
+        await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
+        console.warn(`[SyncExpenses] Google credentials rejected for ${user.email} (${failure.code}). Marked disconnected.`);
+      } else {
+        console.error(`[SyncExpenses] Sync failed for ${user.email} (${failure.code}): ${failure.message}`);
+      }
+
       return res.status(200).json({
         status: 'success',
-        message: 'Gmail access has expired. Please reconnect your Gmail account.',
-        data: { ...stats, reason: 'auth_expired' },
+        message: failure.message,
+        data: { ...stats, reason: failure.code },
       });
     }
 
-    if (!stats.ok) {
-      return res.status(200).json({
-        status: 'success',
-        message: `Gmail sync failed: ${stats.error || 'unknown error'}`,
-        data: stats,
-      });
-    }
+    await recordGmailSyncSuccess(user._id);
 
     const message = stats.created > 0
       ? `Added ${stats.created} transaction${stats.created === 1 ? '' : 's'} for review.`

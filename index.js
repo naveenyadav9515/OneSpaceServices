@@ -33,27 +33,37 @@ const server = app.listen(PORT, async () => {
 
   // 📅 Gmail Watch Renewal: Google's users.watch expires after 7 days.
   // We renew all active watches every 6 days, and also run it once on startup (after 5 seconds).
-  setTimeout(async () => {
-    try {
-      logger.info('📅 Running initial Gmail watch renewal check...');
-      const { renewAllWatches } = require('./automation/gmail/gmail-watch-manager');
-      await renewAllWatches();
-    } catch (err) {
-      logger.error('📅 Gmail watch renewal check failed:', err.message);
-    }
-  }, 5000);
+  //
+  // A developer machine pointed at the production database must NOT run this:
+  // users.watch re-registers the mailbox against whatever topic THIS process is
+  // configured with, so a local restart could silently redirect (or drop)
+  // production's push notifications. Set DISABLE_GMAIL_WATCH_RENEWAL=true
+  // locally; production leaves it unset.
+  if (process.env.DISABLE_GMAIL_WATCH_RENEWAL === 'true') {
+    logger.warn('📅 Gmail watch renewal DISABLED for this process (DISABLE_GMAIL_WATCH_RENEWAL=true)');
+  } else {
+    setTimeout(async () => {
+      try {
+        logger.info('📅 Running initial Gmail watch renewal check...');
+        const { renewAllWatches } = require('./automation/gmail/gmail-watch-manager');
+        await renewAllWatches();
+      } catch (err) {
+        logger.error('📅 Gmail watch renewal check failed:', err.message);
+      }
+    }, 5000);
 
-  const RENEWAL_INTERVAL_MS = 6 * 24 * 60 * 60 * 1000; // 6 days
-  setInterval(async () => {
-    try {
-      logger.info('📅 Starting scheduled Gmail watch renewal...');
-      const { renewAllWatches } = require('./automation/gmail/gmail-watch-manager');
-      await renewAllWatches();
-    } catch (err) {
-      logger.error('📅 Gmail watch renewal scheduler error:', err.message);
-    }
-  }, RENEWAL_INTERVAL_MS);
-  logger.info('📅 Scheduled Gmail watch renewal enabled (every 6 days)');
+    const RENEWAL_INTERVAL_MS = 6 * 24 * 60 * 60 * 1000; // 6 days
+    setInterval(async () => {
+      try {
+        logger.info('📅 Starting scheduled Gmail watch renewal...');
+        const { renewAllWatches } = require('./automation/gmail/gmail-watch-manager');
+        await renewAllWatches();
+      } catch (err) {
+        logger.error('📅 Gmail watch renewal scheduler error:', err.message);
+      }
+    }, RENEWAL_INTERVAL_MS);
+    logger.info('📅 Scheduled Gmail watch renewal enabled (every 6 days)');
+  }
 });
 
 // Handle Unhandled Rejections (Safety Net)

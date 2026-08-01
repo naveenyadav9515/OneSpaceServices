@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const AppError = require('../utils/AppError');
 const { encryptSecret } = require('../utils/crypto.util');
 const { classifyGoogleError, hasGmailReadScope, GMAIL_READONLY_SCOPE } = require('../utils/google-error.util');
+const { recordGmailError, recordGmailSyncSuccess, failureFromStats } = require('../utils/gmail-state.util');
 
 const getGoogleClientConfig = () => {
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -57,24 +58,6 @@ const verifyState = (state) => {
     return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
   } catch {
     return null;
-  }
-};
-
-/**
- * Records why Gmail last failed, so the settings panel can explain itself instead
- * of showing a bare "not connected".
- * @param {string} userId
- * @param {{code: string, message: string}|null} failure null clears the stored error
- */
-const recordGmailError = async (userId, failure) => {
-  try {
-    await User.findByIdAndUpdate(userId, {
-      gmailLastError: failure
-        ? { code: failure.code, message: failure.message, at: new Date() }
-        : { code: null, message: null, at: null },
-    });
-  } catch (err) {
-    console.error('[Gmail Setup] Could not record Gmail error state:', err.message);
   }
 };
 
@@ -438,9 +421,9 @@ async function runPostConnectTasks(user) {
     console.log(`[Gmail Setup] Initial sync for ${user.email}:`, JSON.stringify(stats));
 
     if (stats.ok) {
-      await User.findByIdAndUpdate(user._id, { gmailLastSyncAt: new Date() });
-    } else if (stats.failure) {
-      await recordGmailError(user._id, stats.failure);
+      await recordGmailSyncSuccess(user._id);
+    } else {
+      await recordGmailError(user._id, failureFromStats(stats));
     }
   } catch (syncErr) {
     console.error(`[Gmail Setup] Initial sync crashed for ${user.email}:`, syncErr.message);

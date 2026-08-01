@@ -16,19 +16,19 @@ const { google } = require('googleapis');
 const { createOAuth2Client, fetchEmailList, fetchEmailContent, buildQuery, getSyncCutoffDate } = require('./gmail/gmail-monitor');
 const { getAllSenderEmails, getParserBySender } = require('./parsers/parser-registry');
 const { isDuplicate, createPendingTransaction } = require('./processors/expense-processor');
+const { classifyGoogleError } = require('../utils/google-error.util');
 
 /**
- * Detects a Google credential failure (revoked consent, expired/rotated refresh
- * token, wrong client). These require the user to reconnect — retrying won't help.
- * @param {Error} err
+ * Should a mid-walk failure stop the whole sync?
+ *
+ * Grinding through the remaining messages after Google has started refusing them
+ * burns quota and produces `errors: 200` alongside `ok: true`, which every caller
+ * reads as a successful sync. Stop instead, and report why.
+ * @param {{fatal: boolean, retryable: boolean, code: string}} failure
  * @returns {boolean}
  */
-function isAuthError(err) {
-  if (!err) return false;
-  const status = err.code || err.status || err.response?.status;
-  if (status === 401 || status === 403) return true;
-  const message = `${err.message || ''} ${err.response?.data?.error || ''}`;
-  return /invalid_grant|invalid_credentials|unauthorized_client|Token has been expired or revoked|insufficient (?:permission|scope)/i.test(message);
+function shouldAbortSync(failure) {
+  return failure.fatal || !failure.retryable || failure.code === 'rate_limited';
 }
 
 class AutomationEngine extends EventEmitter {
@@ -52,6 +52,8 @@ class AutomationEngine extends EventEmitter {
       ok: true,
       reason: null,
       error: null,
+      /** Full classification of the failure, when there was one. @see classifyGoogleError */
+      failure: null,
       authExpired: false,
       processed: 0,
       created: 0,
@@ -67,6 +69,8 @@ class AutomationEngine extends EventEmitter {
         stats.ok = false;
         stats.reason = 'no_refresh_token';
         stats.error = 'Gmail account is not linked — no refresh token stored.';
+        stats.failure = { code: 'no_refresh_token', message: stats.error, fatal: true, retryable: false };
+        stats.authExpired = true;
         return stats;
       }
 
@@ -76,6 +80,8 @@ class AutomationEngine extends EventEmitter {
         stats.ok = false;
         stats.reason = 'no_parsers';
         stats.error = 'No bank parsers are registered on the server.';
+        // A server-side configuration gap — never the user's credentials.
+        stats.failure = { code: 'no_parsers', message: stats.error, fatal: false, retryable: false };
         return stats;
       }
 
@@ -177,9 +183,23 @@ class AutomationEngine extends EventEmitter {
 
         } catch (emailErr) {
           stats.errors++;
+          const failure = classifyGoogleError(emailErr);
           const entry = stats.fetchedEmails[stats.fetchedEmails.length - 1];
-          if (entry && entry.id === msg.id) entry.outcome = `error: ${emailErr.message}`;
-          console.error(`[AutomationEngine] Error processing email ${msg.id}:`, emailErr.message);
+          if (entry && entry.id === msg.id) entry.outcome = `error: ${failure.message}`;
+          console.error(`[AutomationEngine] Error processing email ${msg.id} (${failure.code}):`, failure.raw);
+
+          // Google has started refusing us — stop rather than burn the rest of
+          // the window on calls that will fail the same way.
+          if (shouldAbortSync(failure)) {
+            stats.ok = false;
+            stats.failure = failure;
+            stats.reason = failure.code;
+            stats.error = failure.message;
+            stats.authExpired = failure.fatal;
+            console.error(`[AutomationEngine] Aborting sync for ${user.email} after ${stats.processed} emails — ${failure.code}.`);
+            this.emit('sync:error', { user, error: emailErr, stats });
+            return stats;
+          }
         }
       }
 
@@ -189,12 +209,19 @@ class AutomationEngine extends EventEmitter {
     } catch (err) {
       // A fatal error here means we reached NO emails — never report it as a
       // successful sync, or a revoked token looks identical to an empty inbox.
+      //
+      // `classifyGoogleError` decides whether the credential is actually dead.
+      // Treating every 401/403 as revoked consent — which this used to do —
+      // disconnected healthy accounts on the first rate-limit or disabled-API
+      // response, and the user was told only "Gmail is not connected".
+      const failure = classifyGoogleError(err);
       stats.ok = false;
-      stats.error = err.message;
-      stats.authExpired = isAuthError(err);
-      stats.reason = stats.authExpired ? 'auth_expired' : 'gmail_error';
+      stats.failure = failure;
+      stats.reason = failure.code;
+      stats.error = failure.message;
+      stats.authExpired = failure.fatal;
 
-      console.error(`[AutomationEngine] Fatal error for user ${user?.email}:`, err.message);
+      console.error(`[AutomationEngine] Sync failed for user ${user?.email} (${failure.code}):`, failure.raw);
       this.emit('sync:error', { user, error: err, stats });
     }
 
