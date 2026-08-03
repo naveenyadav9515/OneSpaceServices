@@ -31,6 +31,18 @@ const server = app.listen(PORT, async () => {
     logger.info(`♻️ Self keep-alive enabled (every 10 minutes) → ${selfUrl}`);
   }
 
+  // ⚙️ Gmail sync worker + reconciliation sweep.
+  //
+  // The worker drains the durable job queue; the sweep re-reads every connected
+  // mailbox's retention window on a fixed interval. The sweep is what guarantees
+  // no transaction is missed — pushes, watches and watermarks are all allowed to
+  // fail without losing one.
+  //
+  // A developer machine pointed at the production database must NOT run these:
+  // the worker would lease production jobs and sync real users' mailboxes from a
+  // laptop. Set DISABLE_GMAIL_SYNC_WORKER=true locally; production leaves it unset.
+  require('./automation/gmail/sync-scheduler').start();
+
   // 📅 Gmail Watch Renewal: Google's users.watch expires after 7 days.
   // We renew all active watches every 6 days, and also run it once on startup (after 5 seconds).
   //

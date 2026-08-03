@@ -14,6 +14,8 @@ const User = require('../../models/User');
 const config = require('../../config/index');
 const { createOAuth2Client, invalidateOAuth2Client, withGoogleRetry } = require('./gmail-monitor');
 const { classifyGoogleError } = require('../../utils/google-error.util');
+const { recordGmailError } = require('../../utils/gmail-state.util');
+const quota = require('./gmail-quota');
 
 /**
  * Activates Gmail Watch (push notifications) for a single user.
@@ -29,7 +31,10 @@ async function activateWatch(user) {
   const oauth2Client = createOAuth2Client(user);
   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-  const response = await withGoogleRetry(
+  // `users.watch` costs 100 quota units — twenty times a message fetch — so it
+  // goes through the same per-user governor as everything else. A renewal sweep
+  // that ignored it could exhaust a user's budget before their sync began.
+  const response = await quota.spend(user._id, quota.COST.watch, () => withGoogleRetry(
     () => gmail.users.watch({
       userId: 'me',
       requestBody: {
@@ -39,7 +44,7 @@ async function activateWatch(user) {
       },
     }),
     `users.watch for ${user.email}`,
-  );
+  ));
 
   // Update the user's watch expiry and history ID
   if (response.data) {
@@ -113,7 +118,7 @@ async function renewAllWatches({ force = false } = {}) {
     return stats;
   }
 
-  const users = await User.find(query).select('+googleRefreshToken');
+  const users = await User.find(query).select('+googleRefreshToken +gmailAccessToken');
 
   for (const [i, user] of users.entries()) {
     if (!user.googleRefreshToken) {
@@ -149,6 +154,11 @@ async function renewAllWatches({ force = false } = {}) {
       // Google is refusing on quota grounds; renewing the rest of the users now
       // just deepens it. Stop and let the next scheduled run pick them up.
       if (failure.code === 'rate_limited') {
+        // Record the cooldown too. Without this the sync path had no idea the
+        // watch call had just been refused and would hit Google seconds later,
+        // spending the same exhausted budget — the renewal sweep was the one
+        // place that recognised a 429 and then kept the fact to itself.
+        await recordGmailError(user._id, failure);
         console.warn('[GmailWatch] Stopping renewal sweep — Google is rate-limiting.');
         break;
       }

@@ -72,4 +72,13 @@ expenseSchema.index(
 /** Supports the summary aggregations: find({ user, date: { $gte, $lte } }) */
 expenseSchema.index({ user: 1, date: -1 });
 
+/**
+ * Supports the same-minute duplicate check the sync runs for every parsed
+ * transaction: find({ user, amount, merchant, date: { $gte, $lte } }).
+ *
+ * `{ user, date }` above only half-covers that shape, leaving the merchant and
+ * amount to be filtered in memory over every expense the user logged that day.
+ */
+expenseSchema.index({ user: 1, amount: 1, merchant: 1, date: 1 });
+
 module.exports = mongoose.model('Expense', expenseSchema);

@@ -73,10 +73,81 @@ async function recordGmailSyncSuccess(userId) {
 }
 
 /**
+ * Moves the incremental query's starting point forward.
+ *
+ * Only ever moves forward: a stale user document in some other code path must
+ * not be able to drag it backwards, which would re-widen every subsequent
+ * incremental run without anyone noticing.
+ *
+ * Best-effort. A failed write means the next incremental run scans from an older
+ * point — more work, same result — so it must never fail a sync that otherwise
+ * succeeded.
+ * @param {string} userId
+ * @param {Date} watermark
+ * @returns {Promise<void>}
+ */
+async function advanceSyncWatermark(userId, watermark) {
+  try {
+    await User.updateOne(
+      {
+        _id: userId,
+        $or: [
+          { gmailSyncWatermark: null },
+          { gmailSyncWatermark: { $exists: false } },
+          { gmailSyncWatermark: { $lt: watermark } },
+        ],
+      },
+      { $set: { gmailSyncWatermark: watermark } },
+    );
+  } catch (err) {
+    console.warn(`[GmailState] Could not advance the sync watermark: ${err.message}`);
+  }
+}
+
+/**
+ * Records what the reconciliation sweep found.
+ *
+ * `missed` is the count of messages the sweep had to pick up itself because the
+ * push path never delivered them. It is stored rather than only logged so the
+ * health of real-time delivery is queryable per user, not buried in a log that
+ * has already rotated by the time anyone asks.
+ * @param {string} userId
+ * @param {number} missed
+ * @returns {Promise<void>}
+ */
+async function recordSweepOutcome(userId, missed) {
+  try {
+    await User.findByIdAndUpdate(userId, {
+      gmailLastSweepAt: new Date(),
+      gmailLastSweepMissed: missed || 0,
+    });
+  } catch (err) {
+    console.warn(`[GmailState] Could not record the sweep outcome: ${err.message}`);
+  }
+}
+
+/**
+ * Stamps the arrival of a Gmail push notification.
+ *
+ * Read back by the sweep: a mailbox that receives mail but never a push has a
+ * watch that has quietly stopped working, which is otherwise indistinguishable
+ * from a quiet week.
+ * @param {string} userId
+ * @returns {Promise<void>}
+ */
+async function recordGmailPush(userId) {
+  try {
+    await User.findByIdAndUpdate(userId, { gmailLastPushAt: new Date() });
+  } catch (err) {
+    console.warn(`[GmailState] Could not record the push timestamp: ${err.message}`);
+  }
+}
+
+/**
  * How long a sync lock is honoured before another run may steal it.
  *
  * Must exceed the longest a healthy sync can take (the engine caps each run at
- * MAX_FETCHES_PER_SYNC messages, so seconds) with a wide margin, and must be
+ * gmailSync.maxFetchesPerRun messages, so seconds) with a wide margin, and must be
  * short enough that a process killed mid-sync does not lock the user out for
  * long. Render restarts containers freely, so this case is routine, not rare.
  */
@@ -150,5 +221,8 @@ module.exports = {
   getGmailCooldownRemainingMs,
   acquireSyncLock,
   releaseSyncLock,
+  advanceSyncWatermark,
+  recordSweepOutcome,
+  recordGmailPush,
   failureFromStats,
 };

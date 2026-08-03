@@ -4,8 +4,18 @@
  * Coordinates the full pipeline:
  *   Gmail Monitor → Parser Registry → Bank Parser → Expense Processor
  *
- * Provides a single entry point `processUserEmails(user)` that the webhook
- * handler, sync endpoint, and OAuth callback all use.
+ * Runs in one of two modes, and the difference between them is the whole design:
+ *
+ *   'incremental' — everything since the user's watermark. Cheap and narrow;
+ *                   used by the push path, where latency is what matters.
+ *   'full'        — the entire retention window. Used by the reconciliation
+ *                   sweep, by the manual Refresh button, and on connect.
+ *
+ * Completeness rests on the full sweep alone. Pushes, watches, history IDs and
+ * watermarks are latency optimisations, and every one of them is allowed to fail
+ * without losing a transaction — the next sweep re-reads the window and the
+ * ledger tells it what it has not seen. Anything that would make correctness
+ * depend on real-time delivery belongs somewhere else.
  *
  * Uses Node.js EventEmitter for decoupled event-driven architecture.
  * Future modules (Calendar, Reminders, etc.) can subscribe to events.
@@ -13,7 +23,14 @@
 
 const EventEmitter = require('events');
 const { google } = require('googleapis');
-const { createOAuth2Client, fetchEmailList, fetchEmailContent, buildQuery, getSyncCutoffDate } = require('./gmail/gmail-monitor');
+const {
+  createOAuth2Client,
+  fetchEmailList,
+  fetchEmailContent,
+  buildFullQuery,
+  buildIncrementalQuery,
+  getSyncCutoffDate,
+} = require('./gmail/gmail-monitor');
 const { getAllSenderEmails, getParserBySender } = require('./parsers/parser-registry');
 const {
   isDuplicate,
@@ -21,8 +38,15 @@ const {
   filterUnprocessedMessageIds,
   recordProcessedMessages,
 } = require('./processors/expense-processor');
+const config = require('../config/index');
 const { classifyGoogleError } = require('../utils/google-error.util');
-const { getGmailCooldownRemainingMs, acquireSyncLock, releaseSyncLock } = require('../utils/gmail-state.util');
+const {
+  getGmailCooldownRemainingMs,
+  acquireSyncLock,
+  releaseSyncLock,
+  advanceSyncWatermark,
+  recordSweepOutcome,
+} = require('../utils/gmail-state.util');
 
 /**
  * Renders a cooldown as something a person can act on.
@@ -51,20 +75,20 @@ function shouldAbortSync(failure) {
 /**
  * Messages fetched concurrently.
  *
- * Gmail allows 250 quota units per user per second and `messages.get` costs 5,
- * so the hard ceiling is 50 in-flight. Five keeps the sync an order of magnitude
- * clear of it while still being ~5x faster than the sequential walk.
+ * This is no longer the rate limiter — `gmail-quota` is, and it paces by quota
+ * units per second, which is what Gmail actually measures. This number only
+ * bounds how many sockets and how much parsed-email memory one run holds, so it
+ * can be generous: whichever of the two binds first, the governor guarantees the
+ * request rate stays inside the per-user budget regardless of latency.
  */
-const FETCH_CONCURRENCY = 5;
+const FETCH_CONCURRENCY = 10;
 
 /**
- * Messages downloaded per sync run.
- *
- * Bounds how long a single request can take. Anything above the cap is left for
- * the next sync, which resumes cheaply because the ledger already records what
- * was done.
+ * A caller asking for a broader scan than the one already running waits for it
+ * and tries again. This bounds that wait so a mailbox under a constant stream of
+ * pushes cannot defer a sweep indefinitely.
  */
-const MAX_FETCHES_PER_SYNC = 150;
+const MAX_BROADENING_RETRIES = 3;
 
 class AutomationEngine extends EventEmitter {
   constructor() {
@@ -81,8 +105,11 @@ class AutomationEngine extends EventEmitter {
      * the surest way to cross Gmail's per-user 250 quota-units-per-second ceiling.
      *
      * A caller arriving while a sync is in flight now waits for that sync's result
-     * rather than starting a competing one.
-     * @type {Map<string, Promise<object>>}
+     * rather than starting a competing one — but only when the running sync is at
+     * least as broad as what it asked for. Handing a sweep the result of an
+     * incremental run would silently downgrade the one mechanism that guarantees
+     * nothing is missed.
+     * @type {Map<string, {promise: Promise<object>, full: boolean}>}
      */
     this.inFlight = new Map();
   }
@@ -90,25 +117,41 @@ class AutomationEngine extends EventEmitter {
   /**
    * Main entry point — processes Gmail emails for a single user.
    *
-   * This is the ONLY function that controllers should call. Concurrent calls for
-   * the same user share one run; see `inFlight`.
+   * This is the ONLY function that controllers and workers should call.
    *
    * @param {object} user - User document with googleRefreshToken (already selected)
-   * @returns {Promise<{processed: number, created: number, duplicates: number, errors: number}>}
+   * @param {{mode?: 'incremental'|'full', reason?: string, _depth?: number}} [options]
+   * @returns {Promise<object>} stats
    */
-  async processUserEmails(user) {
+  async processUserEmails(user, options = {}) {
+    const { mode = 'full', reason = 'manual', _depth = 0 } = options;
+    const wantsFull = mode !== 'incremental';
     const key = String(user?._id || user?.id || '');
-    if (!key) return this.runSync(user);
+    if (!key) return this.runSync(user, { mode, reason });
 
     const running = this.inFlight.get(key);
     if (running) {
-      console.log(`[AutomationEngine] Sync already running for ${user.email} — joining it instead of starting a second.`);
-      return running;
+      if (running.full || !wantsFull) {
+        console.log(`[AutomationEngine] Sync already running for ${user.email} — joining it instead of starting a second.`);
+        return running.promise;
+      }
+
+      // A full scan cannot be satisfied by the narrower run in flight. Let that
+      // one finish — its ledger writes make this one cheaper — then take a turn.
+      if (_depth < MAX_BROADENING_RETRIES) {
+        console.log(`[AutomationEngine] Waiting for the incremental sync of ${user.email} before running a full scan.`);
+        await running.promise.catch(() => {});
+        return this.processUserEmails(user, { ...options, _depth: _depth + 1 });
+      }
+      console.warn(`[AutomationEngine] Gave up waiting to broaden the sync for ${user.email}; running alongside.`);
     }
 
-    const run = this.runSync(user).finally(() => this.inFlight.delete(key));
-    this.inFlight.set(key, run);
-    return run;
+    const promise = this.runSync(user, { mode, reason }).finally(() => {
+      const current = this.inFlight.get(key);
+      if (current && current.promise === promise) this.inFlight.delete(key);
+    });
+    this.inFlight.set(key, { promise, full: wantsFull });
+    return promise;
   }
 
   /**
@@ -143,7 +186,7 @@ class AutomationEngine extends EventEmitter {
     try {
       stats.processed++;
 
-      const email = await fetchEmailContent(gmail, msg.id);
+      const email = await fetchEmailContent(gmail, msg.id, { userId: user._id });
       debugEntry.subject = email.subject;
       debugEntry.from = email.from;
       debugEntry.date = email.metadata?.internalDate ? new Date(parseInt(email.metadata.internalDate)) : null;
@@ -223,16 +266,55 @@ class AutomationEngine extends EventEmitter {
   }
 
   /**
+   * Chooses the query for this run.
+   *
+   * An incremental run needs a watermark to start from. Without one — a first
+   * sync, or a user whose watermark was cleared — there is nothing to be
+   * incremental about, so it silently widens to a full scan rather than guessing
+   * a start point and risking a gap.
+   *
+   * @param {object} user
+   * @param {string[]} senderEmails
+   * @param {Date} cutoffDate
+   * @param {'incremental'|'full'} mode
+   * @returns {{query: string, effectiveMode: 'incremental'|'full', since: Date}}
+   */
+  buildRunQuery(user, senderEmails, cutoffDate, mode) {
+    if (mode === 'incremental' && user.gmailSyncWatermark) {
+      const watermark = new Date(user.gmailSyncWatermark);
+      // Never reach back past the retention window: mail older than the cutoff
+      // is out of scope regardless of where the watermark sits.
+      const since = watermark > cutoffDate ? watermark : cutoffDate;
+      return {
+        query: buildIncrementalQuery(senderEmails, since),
+        effectiveMode: 'incremental',
+        since,
+      };
+    }
+
+    return {
+      query: buildFullQuery(senderEmails, cutoffDate),
+      effectiveMode: 'full',
+      since: cutoffDate,
+    };
+  }
+
+  /**
    * Performs the sync itself: fetch emails → parse → deduplicate → create pending
    * transactions. Never call directly — go through `processUserEmails`.
    *
    * @param {object} user
+   * @param {{mode: 'incremental'|'full', reason: string}} options
    * @returns {Promise<object>} stats
    */
-  async runSync(user) {
+  async runSync(user, { mode = 'full', reason = 'manual' } = {}) {
     const stats = {
       ok: true,
+      /** What this run actually did — 'incremental' runs can widen to 'full'. */
+      mode,
       reason: null,
+      /** Which trigger asked for this run. Diagnostic only. */
+      trigger: reason,
       error: null,
       /** Full classification of the failure, when there was one. @see classifyGoogleError */
       failure: null,
@@ -241,6 +323,14 @@ class AutomationEngine extends EventEmitter {
       retryAfterSeconds: null,
       /** New messages this run deliberately left for the next sync. */
       remaining: 0,
+      /**
+       * On a full sweep: new messages the push path should already have caught.
+       *
+       * This is the miss-detector for the whole feature. Zero means real-time
+       * delivery is doing its job; anything else means the sweep is currently
+       * the only reason this user's transactions are being recorded at all.
+       */
+      unexpectedNew: 0,
       processed: 0,
       created: 0,
       duplicates: 0,
@@ -252,9 +342,9 @@ class AutomationEngine extends EventEmitter {
     /**
      * Verdicts to append to the message ledger once the walk finishes.
      *
-     * Buffered rather than written per message so a 300-email sync costs one
-     * bulk write instead of 300 round trips. Flushed on the abort path too —
-     * dropping them would make the next sync re-download everything this one
+     * Buffered rather than written per message so a large sync costs one bulk
+     * write instead of one round trip per message. Flushed on the abort path too
+     * — dropping them would make the next sync re-download everything this one
      * already paid for.
      * @type {Array<{id: string, outcome: string}>}
      */
@@ -325,45 +415,53 @@ class AutomationEngine extends EventEmitter {
       const oauth2Client = createOAuth2Client(user);
       const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-      // ── 2. Build query and fetch email list ──
+      // ── 2. Build the query for this run's mode ──
+      //
+      // Captured before the first Gmail call: the watermark this run may set has
+      // to be the moment the query was issued, never the moment it finished, or
+      // mail arriving mid-run falls into the gap between the two.
+      const startedAt = new Date();
       const cutoffDate = getSyncCutoffDate();
-      const query = buildQuery(senderEmails, cutoffDate);
-      console.log(`[AutomationEngine] Gmail query: "${query}" | Cutoff: ${cutoffDate.toISOString()}`);
-      const messages = await fetchEmailList(gmail, query);
+      const { query, effectiveMode } = this.buildRunQuery(user, senderEmails, cutoffDate, mode);
+      stats.mode = effectiveMode;
+
+      console.log(`[AutomationEngine] ${effectiveMode} sync (${reason}) for ${user.email} | query: "${query}" | cutoff: ${cutoffDate.toISOString()}`);
+      const messages = await fetchEmailList(gmail, query, { userId: user._id });
 
       // ── 2b. Drop everything we have already resolved, BEFORE downloading it ──
       //
-      // `messages.get` costs 5 quota units each. Deduplicating only after the
-      // download meant re-paying for the entire window on every single sync, so
-      // an untouched mailbox cost exactly as much as a busy one. This is the
-      // single biggest source of the 429s.
+      // `messages.get` costs 5 quota units each, so this ordering is what makes
+      // repeated scanning of the same window affordable — and therefore what
+      // makes the sweep and the query overlap affordable. Deduplicating after
+      // the download instead meant re-paying for the whole window every sync.
       const messageIds = messages.map(m => m.id);
       const unprocessedIds = new Set(await filterUnprocessedMessageIds(user._id, messageIds));
       stats.skipped.alreadySynced = messageIds.length - unprocessedIds.size;
 
       // ── 3. Decide how much to take on in this run ──
       //
-      // A first connect can face thousands of messages. Fetching all of them
-      // inline made `POST /expenses/sync` run for minutes, long enough for the
-      // browser or Render's gateway to give up — the work continued, but the
-      // user saw a failed sync and pressed Refresh again, stacking another one.
-      //
-      // Taking a fixed slice keeps every request short. Nothing is lost: the
-      // ledger records what this run resolved, so the next sync resumes at the
-      // remainder instead of starting over.
+      // A first connect can face a busy week of alerts. Taking a fixed slice
+      // keeps every run short and predictable. Nothing is lost: the ledger
+      // records what this run resolved, and the worker re-queues the remainder
+      // immediately, so a backlog drains on its own.
       const pending = messages.filter(m => unprocessedIds.has(m.id));
-      const batch = pending.slice(0, MAX_FETCHES_PER_SYNC);
+      const batch = pending.slice(0, config.gmailSync.maxFetchesPerRun);
       stats.remaining = pending.length - batch.length;
+
+      // A full scan that still finds new mail means the push path did not
+      // deliver it. That is the signal worth watching — see `unexpectedNew`.
+      if (effectiveMode === 'full' && user.gmailSyncWatermark) {
+        stats.unexpectedNew = pending.length;
+      }
 
       console.log(`[AutomationEngine] ${messages.length} emails for ${user.email} — ${pending.length} new (fetching ${batch.length}, ${stats.remaining} deferred), ${stats.skipped.alreadySynced} already synced`);
 
-      // ── 4. Fetch and process, a few at a time ──
+      // ── 4. Fetch and process, paced by the quota governor ──
       //
-      // Sequential fetching made a 200-message sync take minutes of round trips.
-      // Unbounded parallelism is the opposite failure: Gmail allows 250 quota
-      // units per user per second and `messages.get` costs 5, so firing them all
-      // at once is a self-inflicted 429. A small fixed pool is quick and stays
-      // an order of magnitude under the ceiling.
+      // Sequential fetching made a large sync take minutes of round trips.
+      // Unbounded parallelism is the opposite failure. The pool below bounds
+      // memory and sockets; `gmail-quota` bounds the request *rate*, which is
+      // the thing Gmail actually measures.
       const queue = [...batch];
       /** Set by whichever worker hits a failure that must stop the whole sync. */
       let abort = null;
@@ -391,6 +489,24 @@ class AutomationEngine extends EventEmitter {
         console.error(`[AutomationEngine] Aborted sync for ${user.email} after ${stats.processed} emails — ${failure.code}.`);
         this.emit('sync:error', { user, stats });
         return stats;
+      }
+
+      // ── 5. Advance the watermark, but only on a run that resolved everything ──
+      //
+      // Deferred messages are not in the ledger yet, and a message that errored
+      // was never resolved at all. Moving the watermark past either would put
+      // them behind the incremental query for good — recoverable only by the
+      // sweep, which is exactly the dependency this is meant to avoid.
+      if (stats.remaining === 0 && stats.errors === 0) {
+        const overlapMs = config.gmailSync.overlapMinutes * 60 * 1000;
+        await advanceSyncWatermark(user._id, new Date(startedAt.getTime() - overlapMs));
+      }
+
+      if (effectiveMode === 'full') {
+        await recordSweepOutcome(user._id, stats.unexpectedNew);
+        if (stats.unexpectedNew > 0) {
+          console.warn(`[AutomationEngine] Sweep found ${stats.unexpectedNew} message(s) the push path missed for ${user.email}. Check the Gmail watch.`);
+        }
       }
 
       this.emit('sync:complete', { user, stats });

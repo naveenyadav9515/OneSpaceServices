@@ -40,6 +40,28 @@ const userSchema = new mongoose.Schema({
     select: false,
   },
   /**
+   * The last access token Google issued, encrypted, with its expiry.
+   *
+   * A client holding only a refresh token must redeem it at the token endpoint
+   * before its first API call. That cache used to live in process memory only,
+   * so every container restart — routine on Render — forced one redemption per
+   * user on their next sync. Google throttles redemptions per (client, user)
+   * more aggressively than Gmail throttles reads, which made restarts, not
+   * mailbox size, the likeliest cause of a 429.
+   *
+   * Persisting the token lets a cold process resume using it for the remainder
+   * of its hour. It is a cache: losing it costs one redemption, never
+   * correctness.
+   */
+  gmailAccessToken: {
+    type: String,
+    select: false,
+  },
+  gmailAccessTokenExpiry: {
+    type: Date,
+    default: null,
+  },
+  /**
    * The Gmail address that was actually authorised, which may differ from the
    * OneSpace login email. Pub/Sub notifications identify a mailbox by this
    * address, so matching on `email` alone silently drops their notifications.
@@ -120,6 +142,59 @@ const userSchema = new mongoose.Schema({
    * otherwise a process that dies mid-sync would block the user permanently.
    */
   gmailSyncLockedAt: {
+    type: Date,
+    default: null,
+  },
+  /**
+   * Start of the window the *incremental* (push-driven) query scans.
+   *
+   * Advanced only after a run that resolved every message it found, and always
+   * set back by `gmailSync.overlapMinutes` so a late-delivered alert cannot fall
+   * behind it. Purely an optimisation for narrowing the query — the periodic
+   * full sweep re-reads the whole retention window regardless, so a wrong or
+   * missing watermark costs latency, never a lost transaction.
+   */
+  gmailSyncWatermark: {
+    type: Date,
+    default: null,
+  },
+  /**
+   * When Gmail last pushed a notification for this mailbox.
+   *
+   * A watch can die quietly: it lapses, or the user files bank alerts out of the
+   * INBOX it subscribes to, and Google simply stops calling. Nothing in the
+   * request path notices, because "no pushes" looks exactly like "no new mail".
+   * Comparing this against what the sweep actually finds is what surfaces it.
+   */
+  gmailLastPushAt: {
+    type: Date,
+    default: null,
+  },
+  /** When the last reconciliation sweep completed for this user. */
+  gmailLastSweepAt: {
+    type: Date,
+    default: null,
+  },
+  /**
+   * Messages the last sweep found that the push path should already have caught.
+   *
+   * This is the miss-detector for the whole feature. In a healthy system it is
+   * always 0; a non-zero value means real-time delivery is broken and the sweep
+   * is the only thing still recording that user's transactions.
+   */
+  gmailLastSweepMissed: {
+    type: Number,
+    default: 0,
+  },
+  /**
+   * When a watch was last re-registered because it had stopped delivering.
+   *
+   * Google asks that `users.watch` be called at most about once a day per
+   * mailbox, and the repair below fires off a condition that can persist across
+   * several sweeps, so it needs its own throttle rather than reusing the
+   * expiry-driven renewal schedule.
+   */
+  gmailWatchRepairedAt: {
     type: Date,
     default: null,
   },

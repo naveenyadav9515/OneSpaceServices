@@ -363,6 +363,12 @@ exports.connectGmail = async (req, res, next) => {
       // A reconnect is an explicit "start over". Carrying a cooldown across it
       // would silently skip the initial sync and look like the connect failed.
       gmailRetryAfter: null,
+      // Likewise for the sync state. A watermark left over from a previous
+      // connection would put the first incremental run after reconnecting past
+      // everything that arrived in between.
+      gmailSyncWatermark: null,
+      gmailSyncLockedAt: null,
+      gmailLastSweepMissed: 0,
       ...(gmailAddress ? { gmailAddress } : {}),
       ...(tokens.scope ? { gmailScopes: String(tokens.scope).split(/\s+/) } : {}),
     };
@@ -385,7 +391,7 @@ exports.connectGmail = async (req, res, next) => {
     }
 
     const updatedUser = await User.findByIdAndUpdate(req.user.id, update, { new: true })
-      .select('+googleRefreshToken');
+      .select('+googleRefreshToken +gmailAccessToken');
 
     // ── 5. Answer now; sync in the background ──
     //
@@ -420,11 +426,18 @@ exports.connectGmail = async (req, res, next) => {
 async function runPostConnectTasks(user) {
   try {
     const engine = require('../automation/engine');
-    const stats = await engine.processUserEmails(user);
+    const stats = await engine.processUserEmails(user, { mode: 'full', reason: 'connect' });
     console.log(`[Gmail Setup] Initial sync for ${user.email}:`, JSON.stringify(stats));
 
     if (stats.ok) {
       await recordGmailSyncSuccess(user._id);
+
+      // A busy week can exceed one run's fetch cap. Hand the rest to the worker
+      // so the account finishes filling in on its own.
+      if (stats.remaining > 0) {
+        const { enqueueSync } = require('../automation/gmail/sync-queue');
+        await enqueueSync(user._id, { full: true, reason: 'backlog' });
+      }
     } else {
       await recordGmailError(user._id, failureFromStats(stats));
     }

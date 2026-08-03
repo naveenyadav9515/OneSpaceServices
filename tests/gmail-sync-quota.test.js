@@ -23,9 +23,11 @@ jest.mock('../automation/gmail/gmail-monitor', () => {
 
 const monitor = require('../automation/gmail/gmail-monitor');
 const engine = require('../automation/engine');
+const config = require('../config/index');
 const User = require('../models/User');
 const GmailSyncedMessage = require('../models/GmailSyncedMessage');
 const PendingTransaction = require('../models/PendingTransaction');
+const GmailSyncJob = require('../models/GmailSyncJob');
 const { classifyGoogleError } = require('../utils/google-error.util');
 
 /**
@@ -57,6 +59,12 @@ function serveMailbox(messages) {
     return found;
   });
 }
+
+/** Message IDs the engine actually downloaded, in call order. */
+const fetchedIds = () => monitor.fetchEmailContent.mock.calls.map(([, id]) => id);
+
+/** The query string the engine handed to `messages.list` on its last run. */
+const lastQuery = () => monitor.fetchEmailList.mock.calls.at(-1)?.[1];
 
 async function makeUser(overrides = {}) {
   return User.create({
@@ -105,7 +113,7 @@ describe('Gmail quota consumption', () => {
     const result = await engine.processUserEmails(user);
 
     expect(monitor.fetchEmailContent).toHaveBeenCalledTimes(1);
-    expect(monitor.fetchEmailContent).toHaveBeenCalledWith(expect.anything(), 'm2');
+    expect(fetchedIds()).toEqual(['m2']);
     expect(result.created).toBe(1);
   });
 
@@ -160,6 +168,185 @@ describe('Gmail quota consumption', () => {
   });
 });
 
+describe('sync window', () => {
+  it('looks back exactly the configured number of days', () => {
+    const cutoff = monitor.getSyncCutoffDate();
+    const days = (Date.now() - cutoff.getTime()) / (24 * 60 * 60 * 1000);
+
+    expect(config.gmailSync.lookbackDays).toBe(7);
+    expect(days).toBeCloseTo(7, 2);
+  });
+
+  it('is the same width every day of the month', () => {
+    // The previous rule took the earlier of "start of last month in IST" and a
+    // configured lookback, so the window silently swung between ~30 and ~62 days
+    // depending on the date. A flat window cannot do that.
+    const widths = [
+      new Date('2026-08-01T04:00:00Z'),
+      new Date('2026-08-31T23:00:00Z'),
+      new Date('2027-01-01T00:30:00Z'),
+    ].map(now => {
+      jest.useFakeTimers().setSystemTime(now);
+      const width = (Date.now() - monitor.getSyncCutoffDate().getTime()) / 86400000;
+      jest.useRealTimers();
+      return Math.round(width);
+    });
+
+    expect(widths).toEqual([7, 7, 7]);
+  });
+});
+
+describe('query modes', () => {
+  it('scans the whole window on a full run', async () => {
+    const user = await makeUser();
+    serveMailbox([]);
+
+    await engine.processUserEmails(user, { mode: 'full' });
+
+    // Day-granular on purpose: this is the query the completeness guarantee
+    // rests on, so it uses only syntax already proven in production.
+    expect(lastQuery()).toMatch(/^after:\d{4}\/\d{2}\/\d{2} from:alerts@axis\.bank\.in$/);
+  });
+
+  it('scans only since the watermark on an incremental run', async () => {
+    const watermark = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const user = await makeUser({ gmailSyncWatermark: watermark });
+    serveMailbox([]);
+
+    await engine.processUserEmails(user, { mode: 'incremental' });
+
+    const seconds = Number(lastQuery().match(/^after:(\d+) /)[1]);
+    expect(seconds).toBe(Math.floor(watermark.getTime() / 1000));
+  });
+
+  it('widens to a full scan when there is no watermark to start from', async () => {
+    // A first sync has nothing to be incremental about. Guessing a start point
+    // would open a gap; widening cannot.
+    const user = await makeUser({ gmailSyncWatermark: null });
+    serveMailbox([]);
+
+    const result = await engine.processUserEmails(user, { mode: 'incremental' });
+
+    expect(result.mode).toBe('full');
+    expect(lastQuery()).toMatch(/^after:\d{4}\/\d{2}\/\d{2} /);
+  });
+
+  it('never reaches back past the retention window', async () => {
+    // A watermark older than the cutoff would otherwise widen the incremental
+    // query beyond the window the product actually supports.
+    const user = await makeUser({ gmailSyncWatermark: new Date(Date.now() - 90 * 86400000) });
+    serveMailbox([]);
+
+    await engine.processUserEmails(user, { mode: 'incremental' });
+
+    const seconds = Number(lastQuery().match(/^after:(\d+) /)[1]);
+    const cutoffSeconds = Math.floor(monitor.getSyncCutoffDate().getTime() / 1000);
+    expect(seconds).toBeGreaterThanOrEqual(cutoffSeconds - 2);
+  });
+});
+
+describe('watermark', () => {
+  it('advances behind the run start, not to it', async () => {
+    // Gmail filters on when Google received the mail, not on when we heard about
+    // it. A watermark set to "now" drops anything whose delivery lagged.
+    const user = await makeUser();
+    serveMailbox([debitAlert('m1', 500)]);
+
+    const before = Date.now();
+    await engine.processUserEmails(user, { mode: 'full' });
+
+    const { gmailSyncWatermark } = await User.findById(user._id).lean();
+    const overlapMs = config.gmailSync.overlapMinutes * 60 * 1000;
+
+    expect(gmailSyncWatermark).not.toBeNull();
+    expect(gmailSyncWatermark.getTime()).toBeLessThanOrEqual(before - overlapMs + 1000);
+    expect(gmailSyncWatermark.getTime()).toBeGreaterThan(before - overlapMs - 60000);
+  });
+
+  it('does not advance past messages the run deferred', async () => {
+    // Deferred messages are not in the ledger yet. Moving the watermark past
+    // them would put them behind every future incremental query.
+    const many = Array.from({ length: 5 }, (_, i) => debitAlert(`m${i}`, 100 + i));
+    const user = await makeUser();
+    serveMailbox(many);
+
+    const realCap = config.gmailSync.maxFetchesPerRun;
+    config.gmailSync.maxFetchesPerRun = 2;
+    let result;
+    try {
+      result = await engine.processUserEmails(user, { mode: 'full' });
+    } finally {
+      config.gmailSync.maxFetchesPerRun = realCap;
+    }
+
+    expect(result.remaining).toBe(3);
+    const { gmailSyncWatermark } = await User.findById(user._id).lean();
+    expect(gmailSyncWatermark).toBeNull();
+  });
+
+  it('does not advance when a message errored', async () => {
+    const user = await makeUser();
+    monitor.fetchEmailList.mockResolvedValue([{ id: 'm1' }]);
+    // A non-Google failure: counted as an error, but not grounds to abort.
+    monitor.fetchEmailContent.mockRejectedValue(new Error('malformed payload'));
+
+    const result = await engine.processUserEmails(user, { mode: 'full' });
+
+    expect(result.errors).toBe(1);
+    const { gmailSyncWatermark } = await User.findById(user._id).lean();
+    expect(gmailSyncWatermark).toBeNull();
+  });
+});
+
+describe('miss detection', () => {
+  /**
+   * Re-reads the user the way every real caller does — the worker, the sync
+   * endpoint and the connect flow all load a fresh document per run, so the
+   * watermark written by the previous sync is visible to the next one.
+   */
+  const reload = (user) => User.findById(user._id).select('+googleRefreshToken');
+
+  it('stays silent on a first sync, which cannot have missed anything', async () => {
+    const user = await makeUser();
+    serveMailbox([debitAlert('m1', 500), debitAlert('m2', 900)]);
+
+    const first = await engine.processUserEmails(user, { mode: 'full', reason: 'sweep' });
+
+    expect(first.created).toBe(2);
+    expect(first.unexpectedNew).toBe(0);
+  });
+
+  it('reports zero when the push path has kept up', async () => {
+    const user = await makeUser();
+    serveMailbox([debitAlert('m1', 500)]);
+    await engine.processUserEmails(user, { mode: 'full' });
+
+    // Second sweep: same mailbox, everything already resolved.
+    const sweep = await engine.processUserEmails(await reload(user), { mode: 'full', reason: 'sweep' });
+
+    expect(sweep.unexpectedNew).toBe(0);
+    const fresh = await User.findById(user._id).lean();
+    expect(fresh.gmailLastSweepMissed).toBe(0);
+    expect(fresh.gmailLastSweepAt).not.toBeNull();
+  });
+
+  it('counts what the sweep had to pick up itself', async () => {
+    // Stands in for a dropped push, a lapsed watch, or downtime: mail arrived
+    // and nothing real-time recorded it.
+    const user = await makeUser();
+    serveMailbox([debitAlert('m1', 500)]);
+    await engine.processUserEmails(user, { mode: 'full' });
+
+    serveMailbox([debitAlert('m1', 500), debitAlert('m2', 900)]);
+    const sweep = await engine.processUserEmails(await reload(user), { mode: 'full', reason: 'sweep' });
+
+    expect(sweep.unexpectedNew).toBe(1);
+    expect(sweep.created).toBe(1);
+    const fresh = await User.findById(user._id).lean();
+    expect(fresh.gmailLastSweepMissed).toBe(1);
+  });
+});
+
 describe('concurrency and backoff', () => {
   it('joins concurrent syncs for one user instead of racing them', async () => {
     const user = await makeUser();
@@ -177,6 +364,35 @@ describe('concurrency and backoff', () => {
     expect(a).toBe(b);
     expect(b).toBe(c);
     expect(a.created).toBe(2);
+  });
+
+  it('does not satisfy a full scan with an incremental run already in flight', async () => {
+    // Joining would hand the sweep an incremental result and silently downgrade
+    // the one mechanism that guarantees nothing is missed.
+    const user = await makeUser({ gmailSyncWatermark: new Date(Date.now() - 3600000) });
+    serveMailbox([]);
+
+    const incremental = engine.processUserEmails(user, { mode: 'incremental' });
+    const full = engine.processUserEmails(user, { mode: 'full' });
+    const [a, b] = await Promise.all([incremental, full]);
+
+    expect(a).not.toBe(b);
+    expect(a.mode).toBe('incremental');
+    expect(b.mode).toBe('full');
+    expect(monitor.fetchEmailList).toHaveBeenCalledTimes(2);
+  });
+
+  it('still joins a narrower request onto a full run in flight', async () => {
+    const user = await makeUser({ gmailSyncWatermark: new Date(Date.now() - 3600000) });
+    serveMailbox([]);
+
+    const [a, b] = await Promise.all([
+      engine.processUserEmails(user, { mode: 'full' }),
+      engine.processUserEmails(user, { mode: 'incremental' }),
+    ]);
+
+    expect(a).toBe(b);
+    expect(monitor.fetchEmailList).toHaveBeenCalledTimes(1);
   });
 
   it('refuses to call Google while a cooldown is active', async () => {
@@ -199,6 +415,92 @@ describe('concurrency and backoff', () => {
 
     expect(result.ok).toBe(true);
     expect(result.created).toBe(1);
+  });
+});
+
+describe('end to end: nothing real-time is load-bearing', () => {
+  // Exercises the real seam — sweep → queue → worker → engine → database — with
+  // only the Gmail transport stubbed. These are the failures the whole design
+  // exists to absorb, so they are asserted against the transaction actually
+  // landing, not against an intermediate stat.
+  const scheduler = require('../automation/gmail/sync-scheduler');
+
+  /** Runs the worker until the queue is empty, so a deferred slice still drains. */
+  async function drainFully(maxTicks = 10) {
+    for (let i = 0; i < maxTicks; i++) {
+      if (await scheduler.drainQueue() === 0) return;
+    }
+  }
+
+  it('records a transaction whose push was never delivered', async () => {
+    const user = await makeUser({ gmailSyncWatermark: new Date(Date.now() - 3600000) });
+
+    // The alert arrives. No push follows — dropped, or the watch had lapsed, or
+    // the container was asleep. Nothing calls the engine.
+    serveMailbox([debitAlert('m1', 1250)]);
+    expect(await PendingTransaction.countDocuments({ user: user._id })).toBe(0);
+
+    // The sweep runs on its own schedule and does not consult any of that.
+    await scheduler.runSweep();
+    await drainFully();
+
+    const [txn] = await PendingTransaction.find({ user: user._id }).lean();
+    expect(txn).toBeDefined();
+    expect(txn.amount).toBe(1250);
+    expect(txn.gmailMessageId).toBe('m1');
+  });
+
+  it('drains a backlog larger than one run without anyone pressing a button', async () => {
+    const alerts = Array.from({ length: 7 }, (_, i) => debitAlert(`m${i}`, 100 + i));
+    const user = await makeUser();
+    serveMailbox(alerts);
+
+    const realCap = config.gmailSync.maxFetchesPerRun;
+    config.gmailSync.maxFetchesPerRun = 2;
+    try {
+      await scheduler.runSweep();
+      await drainFully();
+    } finally {
+      config.gmailSync.maxFetchesPerRun = realCap;
+    }
+
+    expect(await PendingTransaction.countDocuments({ user: user._id })).toBe(7);
+    expect(await GmailSyncJob.countDocuments({ user: user._id })).toBe(0);
+  });
+
+  it('does not double-record a transaction the push path already captured', async () => {
+    // The sweep re-lists everything the incremental run just handled. The ledger
+    // is what makes that overlap free — and idempotent.
+    const user = await makeUser({ gmailSyncWatermark: new Date(Date.now() - 3600000) });
+    serveMailbox([debitAlert('m1', 640)]);
+
+    await engine.processUserEmails(user, { mode: 'incremental', reason: 'push' });
+    monitor.fetchEmailContent.mockClear();
+
+    await scheduler.runSweep();
+    await drainFully();
+
+    expect(monitor.fetchEmailContent).not.toHaveBeenCalled();
+    expect(await PendingTransaction.countDocuments({ user: user._id })).toBe(1);
+  });
+
+  it('picks the account back up after a rate limit expires', async () => {
+    const user = await makeUser({ gmailRetryAfter: new Date(Date.now() + 60 * 1000) });
+    serveMailbox([debitAlert('m1', 300)]);
+
+    await scheduler.runSweep();
+    await drainFully(2);
+
+    // Parked, not lost: no Gmail call, and the job is still queued.
+    expect(monitor.fetchEmailList).not.toHaveBeenCalled();
+    expect(await GmailSyncJob.countDocuments({ user: user._id })).toBe(1);
+
+    // Cooldown lapses and the queued job becomes due again.
+    await User.findByIdAndUpdate(user._id, { gmailRetryAfter: new Date(Date.now() - 1000) });
+    await GmailSyncJob.updateOne({ user: user._id }, { $set: { dueAt: new Date(0) } });
+    await drainFully();
+
+    expect(await PendingTransaction.countDocuments({ user: user._id })).toBe(1);
   });
 });
 

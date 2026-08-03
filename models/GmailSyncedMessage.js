@@ -3,29 +3,28 @@ const mongoose = require('mongoose');
 /**
  * Ledger of Gmail message IDs this user's sync has already looked at.
  *
- * Without it, every sync re-downloaded every message in the lookback window.
- * `messages.get` costs 5 Gmail quota units, so a mailbox with 300 bank alerts in
- * the window burned 1,500 units per sync — on every Pub/Sub push, of which Gmail
- * sends one for *any* inbox change, not just bank mail. That is how a healthy
- * account walks into a 429.
+ * This is the load-bearing piece of the whole sync design. Because it records a
+ * verdict for *every* message the engine resolves — including the ones that
+ * produce nothing, like statements and promos from the same sender — repeated
+ * scanning of the same window is nearly free. `messages.get` costs 5 quota units
+ * and is issued only for IDs absent from here.
  *
- * PendingTransaction.gmailMessageId only records messages that produced a
- * transaction. The expensive ones are the messages that produce nothing —
- * promos, OTPs, credit alerts from the same sender — because they leave no trace
- * and so were fetched again, in full, forever. This collection records the
- * outcome for *every* message the engine has resolved, so each one costs its
- * 5 units exactly once.
+ * That is what makes the rest of the architecture affordable: the reconciliation
+ * sweep can re-read the entire retention window every couple of hours, and the
+ * incremental query can overlap generously behind its watermark, precisely
+ * because re-seeing a known message costs one indexed lookup instead of a
+ * download.
  */
 
 /**
  * How long an entry is kept.
  *
- * MUST stay comfortably above the widest sync window (the previous-month floor,
- * or GMAIL_SYNC_LOOKBACK_DAYS if that reaches further back). If an entry expires
- * while its message is still inside the window, that message gets re-fetched —
- * correct, just wasteful.
+ * MUST stay comfortably above `gmailSync.lookbackDays` (7). An entry that
+ * expires while its message is still inside the sweep window gets re-downloaded
+ * — correct, just wasteful — so the margin here is deliberate slack, not a
+ * tuning knob. Raise it before raising the lookback.
  */
-const LEDGER_TTL_DAYS = 180;
+const LEDGER_TTL_DAYS = 30;
 
 const gmailSyncedMessageSchema = new mongoose.Schema({
   user: {

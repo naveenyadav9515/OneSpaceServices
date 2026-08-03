@@ -358,7 +358,7 @@ exports.simulateAutoLog = async (req, res, next) => {
 exports.syncExpenses = async (req, res, next) => {
   try {
     const User = require('../models/User');
-    const user = await User.findById(req.user.id).select('+googleRefreshToken');
+    const user = await User.findById(req.user.id).select('+googleRefreshToken +gmailAccessToken');
 
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'User not found' });
@@ -382,7 +382,12 @@ exports.syncExpenses = async (req, res, next) => {
 
     const engine = require('../automation/engine');
     const { recordGmailError, recordGmailSyncSuccess, failureFromStats } = require('../utils/gmail-state.util');
-    const stats = await engine.processUserEmails(user);
+
+    // A person pressing Refresh is asking "are you sure you have everything?",
+    // not "check for anything since your watermark". Run the full window — it is
+    // one `messages.list` wider than the incremental path, and every message it
+    // re-lists is filtered out by the ledger before costing anything.
+    const stats = await engine.processUserEmails(user, { mode: 'full', reason: 'manual' });
     console.log('[SyncExpenses] Engine stats:', JSON.stringify(stats));
 
     if (!stats.ok) {
@@ -410,7 +415,15 @@ exports.syncExpenses = async (req, res, next) => {
 
     await recordGmailSyncSuccess(user._id);
 
-    // `processed` now counts only messages this run actually downloaded — anything
+    // The run hit its per-run fetch cap. Hand the remainder to the worker rather
+    // than telling the user to press the button again — the queue drains it in
+    // the background and the pending list fills in on its own.
+    if (stats.remaining > 0) {
+      const { enqueueSync } = require('../automation/gmail/sync-queue');
+      await enqueueSync(user._id, { full: true, reason: 'backlog' });
+    }
+
+    // `processed` counts only messages this run actually downloaded — anything
     // resolved by an earlier sync is filtered out before Gmail is called. Reading
     // "nothing new" off `processed` alone would therefore report a mailbox full of
     // already-recorded alerts as an empty one.
@@ -519,7 +532,7 @@ exports.disconnectGmail = async (req, res, next) => {
     const { decryptSecret } = require('../utils/crypto.util');
     const { invalidateOAuth2Client } = require('../automation/gmail/gmail-monitor');
 
-    const user = await User.findById(req.user.id).select('+googleRefreshToken');
+    const user = await User.findById(req.user.id).select('+googleRefreshToken +gmailAccessToken');
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'User not found' });
     }
@@ -528,6 +541,11 @@ exports.disconnectGmail = async (req, res, next) => {
     // hour after revocation, so leaving it in place lets a disconnected account
     // keep syncing until that token happens to expire.
     invalidateOAuth2Client(user._id);
+
+    // Anything already queued would otherwise be leased by the worker moments
+    // from now and try to sync a mailbox the user has just disconnected.
+    const { clearJobsForUser } = require('../automation/gmail/sync-queue');
+    await clearJobsForUser(user._id);
 
     // Try to revoke the token with Google
     if (user.googleRefreshToken) {
@@ -546,14 +564,24 @@ exports.disconnectGmail = async (req, res, next) => {
       }
     }
 
-    // Clear Gmail credentials and disable automation in db
+    // Clear Gmail credentials, cached tokens and all sync state. A reconnect has
+    // to start from a clean slate: a stale watermark left behind would make the
+    // first incremental run after reconnecting skip everything before it.
     user.gmailConnected = false;
     user.googleRefreshToken = undefined;
+    user.gmailAccessToken = undefined;
+    user.gmailAccessTokenExpiry = null;
     user.expenseAutomationEnabled = false;
     user.expenseAutomationBanks = [];
     user.gmailWatchExpiry = undefined;
     user.gmailHistoryId = undefined;
     user.gmailRetryAfter = null;
+    user.gmailSyncWatermark = null;
+    user.gmailSyncLockedAt = null;
+    user.gmailLastPushAt = null;
+    user.gmailLastSweepAt = null;
+    user.gmailLastSweepMissed = 0;
+    user.gmailWatchRepairedAt = null;
     await user.save();
 
     res.status(200).json({

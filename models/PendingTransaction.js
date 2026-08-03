@@ -119,4 +119,13 @@ pendingTransactionSchema.index(
 /** Supports the pending-list query: find({ user, status }).sort({ date: -1 }) */
 pendingTransactionSchema.index({ user: 1, status: 1, date: -1 });
 
+/**
+ * Supports the same-minute duplicate check the sync runs for every parsed
+ * transaction: find({ user, amount, merchant, date: { $gte, $lte } }).
+ *
+ * The index above leads with `status`, which that query does not constrain, so
+ * it cannot be used for this shape.
+ */
+pendingTransactionSchema.index({ user: 1, amount: 1, merchant: 1, date: 1 });
+
 module.exports = mongoose.model('PendingTransaction', pendingTransactionSchema);

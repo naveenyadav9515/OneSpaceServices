@@ -79,38 +79,31 @@ async function recordProcessedMessages(userId, entries) {
 }
 
 /**
- * Checks if a transaction is a duplicate.
- * Uses two deduplication strategies:
- *   1. gmailMessageId (exact match — guaranteed unique per email)
- *   2. amount + merchant + date within the same minute window
+ * Checks whether a parsed transaction duplicates one we already hold.
+ *
+ * This covers only the *cross-message* case: the same payment announced by two
+ * different emails, which carry different Gmail message IDs and so cannot be
+ * caught by identity. Matching is on amount + merchant within the same minute.
+ *
+ * Same-message duplication is handled earlier and more cheaply. Every message
+ * reaching this point has already been cleared by `filterUnprocessedMessageIds`,
+ * which establishes in one batched query per collection that its ID appears in
+ * neither `PendingTransaction` nor `Expense`. Re-asking per message — as this
+ * function used to, with two `findOne` calls before the checks below — restated
+ * that guarantee at two round trips per message and answered `false` every time.
+ * The only gap it could have covered is a concurrent run inserting the same ID
+ * mid-flight, and the unique index already turns that into a null from
+ * `createPendingTransaction`, counted as a duplicate by the caller.
  *
  * @param {string} userId - User's MongoDB ObjectId
  * @param {object} transaction - Parsed transaction { amount, merchant, date, gmailMessageId }
  * @returns {Promise<boolean>} true if duplicate
  */
 async function isDuplicate(userId, transaction) {
-  // Strategy 1: Check by Gmail Message ID (most reliable)
-  if (transaction.gmailMessageId) {
-    const byMessageId = await PendingTransaction.findOne({
-      user: userId,
-      gmailMessageId: transaction.gmailMessageId,
-    });
-    if (byMessageId) return true;
-
-    // Also check Expense collection (in case it was already approved)
-    const inExpenses = await Expense.findOne({
-      user: userId,
-      gmailMessageId: transaction.gmailMessageId,
-    });
-    if (inExpenses) return true;
-  }
-
-  // Strategy 2: Check by amount + merchant + same minute window.
-  //
   // Only safe with a real merchant name. When extraction fell back to the
   // generic placeholder, this check would collapse two genuinely different
   // same-amount transactions in the same minute into one — so we skip it.
-  // Such records still carry a gmailMessageId, so Strategy 1 covers them.
+  // Such records still carry a gmailMessageId, so identity still protects them.
   if (!transaction.merchant || transaction.merchant === GENERIC_MERCHANT) {
     return false;
   }
@@ -119,23 +112,22 @@ async function isDuplicate(userId, transaction) {
   minuteStart.setSeconds(0, 0);
   const minuteEnd = new Date(minuteStart.getTime() + 59999);
 
-  const duplicateInHistory = await Expense.findOne({
+  // Both collections answer the same question, so ask them at once rather than
+  // paying two serial round trips per message. Covered by the
+  // { user, amount, merchant, date } index on each.
+  const match = {
     user: userId,
     amount: transaction.amount,
     merchant: transaction.merchant,
     date: { $gte: minuteStart, $lte: minuteEnd },
-  });
-  if (duplicateInHistory) return true;
+  };
 
-  const duplicateInPending = await PendingTransaction.findOne({
-    user: userId,
-    amount: transaction.amount,
-    merchant: transaction.merchant,
-    date: { $gte: minuteStart, $lte: minuteEnd },
-  });
-  if (duplicateInPending) return true;
+  const [inHistory, inPending] = await Promise.all([
+    Expense.findOne(match).select('_id').lean(),
+    PendingTransaction.findOne(match).select('_id').lean(),
+  ]);
 
-  return false;
+  return Boolean(inHistory || inPending);
 }
 
 /**
