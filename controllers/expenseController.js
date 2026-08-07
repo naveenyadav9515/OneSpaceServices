@@ -188,20 +188,38 @@ exports.getExpenseSummary = async (req, res, next) => {
       .sort((a, b) => b.amount - a.amount)
       .slice(0, 5);
 
-    // ── 7. Chart Data — last 7 days in IST ──
-    const sevenDaysAgoIST = new Date(istNow);
-    sevenDaysAgoIST.setDate(istNow.getDate() - 6);
-    
-    const startOfChartRange = new Date(`${sevenDaysAgoIST.getFullYear()}-${String(sevenDaysAgoIST.getMonth() + 1).padStart(2, '0')}-${String(sevenDaysAgoIST.getDate()).padStart(2, '0')}T00:00:00.000+05:30`);
+    // ── 7. Chart Data — the current week, Sunday → Saturday, in IST ──
+    // This was a rolling seven days ending today, which only lined up with the
+    // calendar week when today happened to be a Saturday — on a Thursday it
+    // read Fri…Thu and spanned two different weeks, so "this week's total"
+    // included days from the previous one. Anchoring to Sunday makes the bars
+    // and the weekly total describe the period the labels claim.
+    const weekStartIST = new Date(istNow);
+    weekStartIST.setDate(istNow.getDate() - istNow.getDay()); // getDay(): 0 = Sunday
 
-    // Fetch 7-day expenses in a single query
+    const startOfChartRange = new Date(`${weekStartIST.getFullYear()}-${String(weekStartIST.getMonth() + 1).padStart(2, '0')}-${String(weekStartIST.getDate()).padStart(2, '0')}T00:00:00.000+05:30`);
+
+    // Through Saturday rather than `now`: the rest of the week still belongs to
+    // it, those days simply have nothing in them yet.
+    const weekEndIST = new Date(weekStartIST);
+    weekEndIST.setDate(weekStartIST.getDate() + 6);
+    const endOfChartRange = new Date(`${weekEndIST.getFullYear()}-${String(weekEndIST.getMonth() + 1).padStart(2, '0')}-${String(weekEndIST.getDate()).padStart(2, '0')}T23:59:59.999+05:30`);
+
     const weekExpenses = await Expense.find({
       user: userId,
-      date: { $gte: startOfChartRange, $lte: now }
+      date: { $gte: startOfChartRange, $lte: endOfChartRange }
     });
 
     const chartLabels = [];
     const chartData = [];
+    /**
+     * Per-day detail for the trend chart. `labels`/`data` above stay as they
+     * are, but a weekday initial alone can't say *which* Saturday, and the
+     * client needs to know which day is today and which are still to come so
+     * it can mark them rather than drawing them as genuine zeroes.
+     */
+    const chartDays = [];
+    const todayKey = `${istNow.getFullYear()}-${istNow.getMonth()}-${istNow.getDate()}`;
     let weeklyTotal = 0;
 
     for (let i = 0; i < 7; i++) {
@@ -209,13 +227,25 @@ exports.getExpenseSummary = async (req, res, next) => {
       d.setDate(d.getDate() + i);
       const dStart = new Date(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T00:00:00.000+05:30`);
       const dEnd = new Date(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T23:59:59.999+05:30`);
-      
+
       const dayTotal = weekExpenses
         .filter(e => e.date >= dStart && e.date <= dEnd)
         .reduce((sum, e) => sum + e.amount, 0);
-        
+
+      const isToday = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}` === todayKey;
+
       chartLabels.push(dStart.toLocaleDateString('en-US', { weekday: 'short' }));
       chartData.push(dayTotal);
+      chartDays.push({
+        label: dStart.toLocaleDateString('en-US', { weekday: 'short' }),
+        dayOfMonth: d.getDate(),
+        month: dStart.toLocaleDateString('en-US', { month: 'short' }),
+        date: dStart.toISOString(),
+        amount: dayTotal,
+        isToday,
+        isFuture: dStart > istNow && !isToday,
+      });
+
       weeklyTotal += dayTotal;
     }
 
@@ -279,6 +309,9 @@ exports.getExpenseSummary = async (req, res, next) => {
         spendingTrend: {
           labels: chartLabels,
           data: chartData,
+          days: chartDays,
+          weekStart: startOfChartRange.toISOString(),
+          weekEnd: endOfChartRange.toISOString(),
           avgPerWeek: Math.round(weeklyTotal),
           trendPct,
           trendStatus
