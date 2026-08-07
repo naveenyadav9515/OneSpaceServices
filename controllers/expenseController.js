@@ -253,6 +253,22 @@ exports.getExpenseSummary = async (req, res, next) => {
       weeklyTotal += dayTotal;
     }
 
+    // ── 7b. Month-to-date daily totals ──
+    // The projection chart plots the month's cumulative spend against the
+    // budget, which needs a per-day series rather than a single total. Built
+     // through the same IST shadow dates as the weekly chart above.
+    const monthDaily = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dayStart = istMidnight(new Date(Date.UTC(istNow.getFullYear(), istNow.getMonth(), day)));
+      const dayEnd = new Date(istMidnight(new Date(Date.UTC(istNow.getFullYear(), istNow.getMonth(), day + 1))).getTime() - 1);
+
+      monthDaily.push(
+        thisMonthExpenses
+          .filter(e => e.date >= dayStart && e.date <= dayEnd)
+          .reduce((sum, e) => sum + e.amount, 0)
+      );
+    }
+
     // ── 8. Real trend calculation ──
     // Compare current month's daily avg with previous month's daily avg
     const prevDailyAvg = prevMonthSpend / prevDaysInMonth;
@@ -320,6 +336,8 @@ exports.getExpenseSummary = async (req, res, next) => {
           trendPct,
           trendStatus
         },
+        monthDaily,
+        dayOfMonth: istNow.getDate(),
         forecast: {
           estimatedSpend,
           statusText: isHealthy ? "You're on track to stay within budget." : "You're projected to exceed your budget.",
