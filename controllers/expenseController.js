@@ -188,22 +188,15 @@ exports.getExpenseSummary = async (req, res, next) => {
       .sort((a, b) => b.amount - a.amount)
       .slice(0, 5);
 
-    // ── 7. Chart Data — the current week, Sunday → Saturday, in IST ──
-    // This was a rolling seven days ending today, which only lined up with the
-    // calendar week when today happened to be a Saturday — on a Thursday it
-    // read Fri…Thu and spanned two different weeks, so "this week's total"
-    // included days from the previous one. Anchoring to Sunday makes the bars
-    // and the weekly total describe the period the labels claim.
+    // ── 7. Chart Data — the last 7 days in IST, ending today ──
+    // A rolling window, so the rightmost column is always the present day and
+    // the chart answers "how have I been spending lately" rather than "how far
+    // into this week am I".
     const weekStartIST = new Date(istNow);
-    weekStartIST.setDate(istNow.getDate() - istNow.getDay()); // getDay(): 0 = Sunday
+    weekStartIST.setDate(istNow.getDate() - 6);
 
     const startOfChartRange = new Date(`${weekStartIST.getFullYear()}-${String(weekStartIST.getMonth() + 1).padStart(2, '0')}-${String(weekStartIST.getDate()).padStart(2, '0')}T00:00:00.000+05:30`);
-
-    // Through Saturday rather than `now`: the rest of the week still belongs to
-    // it, those days simply have nothing in them yet.
-    const weekEndIST = new Date(weekStartIST);
-    weekEndIST.setDate(weekStartIST.getDate() + 6);
-    const endOfChartRange = new Date(`${weekEndIST.getFullYear()}-${String(weekEndIST.getMonth() + 1).padStart(2, '0')}-${String(weekEndIST.getDate()).padStart(2, '0')}T23:59:59.999+05:30`);
+    const endOfChartRange = new Date(`${istNow.getFullYear()}-${String(istNow.getMonth() + 1).padStart(2, '0')}-${String(istNow.getDate()).padStart(2, '0')}T23:59:59.999+05:30`);
 
     const weekExpenses = await Expense.find({
       user: userId,
