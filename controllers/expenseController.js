@@ -40,6 +40,40 @@ exports.createExpense = async (req, res, next) => {
   }
 };
 
+/**
+ * Edit an existing expense in place.
+ *
+ * Only the fields a user can actually change are copied across — spreading
+ * req.body straight into the update would let a caller reassign `user` or
+ * overwrite `gmailMessageId`, which is the key the sync engine uses to avoid
+ * logging the same email twice. The `user` term in the filter is what scopes
+ * the edit to the owner, exactly as deleteExpense does.
+ */
+exports.updateExpense = async (req, res, next) => {
+  try {
+    const { amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
+
+    const updates = { amount, category, merchant, tags, notes, date, paymentMethod };
+    // A field the client omitted should keep its stored value rather than being
+    // written to undefined.
+    Object.keys(updates).forEach((key) => updates[key] === undefined && delete updates[key]);
+
+    const expense = await Expense.findOneAndUpdate(
+      { _id: req.params.id, user: req.user.id },
+      { $set: updates },
+      { new: true, runValidators: true },
+    );
+
+    if (!expense) {
+      return res.status(404).json({ status: 'error', message: 'Expense not found' });
+    }
+
+    res.status(200).json({ status: 'success', data: expense });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.deleteExpense = async (req, res, next) => {
   try {
     const expense = await Expense.findOneAndDelete({ _id: req.params.id, user: req.user.id });
