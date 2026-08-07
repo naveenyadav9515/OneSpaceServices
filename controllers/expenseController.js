@@ -1,5 +1,6 @@
 const Expense = require('../models/Expense');
 const PendingTransaction = require('../models/PendingTransaction');
+const User = require('../models/User');
 const config = require('../config/index');
 const AppError = require('../utils/AppError');
 
@@ -49,6 +50,40 @@ exports.createExpense = async (req, res, next) => {
  * logging the same email twice. The `user` term in the filter is what scopes
  * the edit to the owner, exactly as deleteExpense does.
  */
+/**
+ * Set the signed-in user's monthly budget.
+ *
+ * Rejects anything that isn't a positive, finite number: the budget is a
+ * divisor for budgetUsedPct and the safe-to-spend figure, so a zero or a
+ * stray string would turn the whole summary into Infinity/NaN.
+ */
+exports.updateBudget = async (req, res, next) => {
+  try {
+    const value = Number(req.body.monthlyBudget);
+
+    if (!Number.isFinite(value) || value <= 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Monthly budget must be a number greater than zero.',
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $set: { monthlyBudget: Math.round(value) } },
+      { new: true, runValidators: true },
+    ).select('monthlyBudget');
+
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'User not found' });
+    }
+
+    res.status(200).json({ status: 'success', data: { monthlyBudget: user.monthlyBudget } });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.updateExpense = async (req, res, next) => {
   try {
     const { amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
@@ -129,7 +164,13 @@ exports.getExpenseSummary = async (req, res, next) => {
     const prevMonthSpend = prevMonthExpenses.reduce((sum, e) => sum + e.amount, 0);
 
     // ── 5. Budget calculations ──
-    const budgetTarget = config.app.expenseMonthlyBudget;
+    // The user's own target. Accounts created before this was configurable have
+    // null and keep the old shared default until they set one themselves.
+    const budgetUser = await User.findById(userId).select('monthlyBudget').lean();
+    const budgetTarget =
+      budgetUser?.monthlyBudget != null && budgetUser.monthlyBudget > 0
+        ? budgetUser.monthlyBudget
+        : config.app.expenseMonthlyBudget;
     const budgetUsedPct = Math.min(100, Math.round((monthlySpend / budgetTarget) * 100));
 
     // ── 6. Top Categories (from this month only) ──

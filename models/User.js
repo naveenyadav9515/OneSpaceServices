@@ -72,6 +72,20 @@ const userSchema = new mongoose.Schema({
     default: null,
     index: true,
   },
+  /**
+   * The user's own monthly spending budget.
+   *
+   * This used to be config.app.expenseMonthlyBudget — one EXPENSE_MONTHLY_BUDGET
+   * env var shared by every account on the server, which meant a personal target
+   * was neither personal nor changeable without a redeploy. Null means "never
+   * set", so the summary can fall back to the old default for existing users
+   * instead of showing them a budget of zero.
+   */
+  monthlyBudget: {
+    type: Number,
+    default: null,
+    min: [0, 'Budget cannot be negative'],
+  },
   expenseAutomationEnabled: {
     type: Boolean,
     default: false,
