@@ -189,14 +189,24 @@ exports.getExpenseSummary = async (req, res, next) => {
       .slice(0, 5);
 
     // ── 7. Chart Data — the last 7 days in IST, ending today ──
-    // A rolling window, so the rightmost column is always the present day and
-    // the chart answers "how have I been spending lately" rather than "how far
-    // into this week am I".
-    const weekStartIST = new Date(istNow);
-    weekStartIST.setDate(istNow.getDate() - 6);
+    // A rolling window, so the rightmost column is always the present day.
+    //
+    // Every date here is handled through a UTC "shadow": a Date whose UTC
+    // fields carry the IST calendar Y/M/D. The previous version stepped through
+    // absolute instants instead, and IST midnight is 18:30 UTC on the *previous*
+    // day — so on a UTC host (which is what we deploy to) getDate() and an
+    // unqualified toLocaleDateString() both read the day before. That shifted
+    // the whole window back one day, dropping today off the chart, and pinned
+    // each weekday label to the wrong date. Date.UTC() also rolls months and
+    // years over on its own, so no boundary arithmetic is needed.
+    const IST_OFFSET_MS = 5.5 * 3600000;
+    const istShadow = (offsetDays) =>
+      new Date(Date.UTC(istNow.getFullYear(), istNow.getMonth(), istNow.getDate() + offsetDays));
+    /** The real instant IST midnight begins, for a shadow date. */
+    const istMidnight = (shadow) => new Date(shadow.getTime() - IST_OFFSET_MS);
 
-    const startOfChartRange = new Date(`${weekStartIST.getFullYear()}-${String(weekStartIST.getMonth() + 1).padStart(2, '0')}-${String(weekStartIST.getDate()).padStart(2, '0')}T00:00:00.000+05:30`);
-    const endOfChartRange = new Date(`${istNow.getFullYear()}-${String(istNow.getMonth() + 1).padStart(2, '0')}-${String(istNow.getDate()).padStart(2, '0')}T23:59:59.999+05:30`);
+    const startOfChartRange = istMidnight(istShadow(-6));
+    const endOfChartRange = new Date(istMidnight(istShadow(1)).getTime() - 1);
 
     const weekExpenses = await Expense.find({
       user: userId,
@@ -212,31 +222,32 @@ exports.getExpenseSummary = async (req, res, next) => {
      * it can mark them rather than drawing them as genuine zeroes.
      */
     const chartDays = [];
-    const todayKey = `${istNow.getFullYear()}-${istNow.getMonth()}-${istNow.getDate()}`;
     let weeklyTotal = 0;
 
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(startOfChartRange);
-      d.setDate(d.getDate() + i);
-      const dStart = new Date(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T00:00:00.000+05:30`);
-      const dEnd = new Date(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T23:59:59.999+05:30`);
+    // -6 … 0, so the last column is today.
+    for (let offset = -6; offset <= 0; offset++) {
+      const shadow = istShadow(offset);
+      const dStart = istMidnight(shadow);
+      const dEnd = new Date(istMidnight(istShadow(offset + 1)).getTime() - 1);
 
       const dayTotal = weekExpenses
         .filter(e => e.date >= dStart && e.date <= dEnd)
         .reduce((sum, e) => sum + e.amount, 0);
 
-      const isToday = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}` === todayKey;
+      // Formatted off the shadow in UTC, so the weekday always belongs to the
+      // IST date printed beside it, whatever zone the host runs in.
+      const label = shadow.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
 
-      chartLabels.push(dStart.toLocaleDateString('en-US', { weekday: 'short' }));
+      chartLabels.push(label);
       chartData.push(dayTotal);
       chartDays.push({
-        label: dStart.toLocaleDateString('en-US', { weekday: 'short' }),
-        dayOfMonth: d.getDate(),
-        month: dStart.toLocaleDateString('en-US', { month: 'short' }),
+        label,
+        dayOfMonth: shadow.getUTCDate(),
+        month: shadow.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }),
         date: dStart.toISOString(),
         amount: dayTotal,
-        isToday,
-        isFuture: dStart > istNow && !isToday,
+        isToday: offset === 0,
+        isFuture: false,
       });
 
       weeklyTotal += dayTotal;
