@@ -8,8 +8,9 @@ const { syncLimiter } = require('../middleware/rate-limiter');
 router.use(protect);
 
 router.get('/summary', expenseController.getExpenseSummary);
-// Declared before '/:id' so "budget" is never swallowed as an expense id.
+// Declared before '/:id' so these are never swallowed as an expense id.
 router.patch('/budget', expenseController.updateBudget);
+router.patch('/categories/reassign', expenseController.reassignCategory);
 
 router.get('/pending', expenseController.getPendingTransactions);
 router.post('/pending/simulate', expenseController.simulateAutoLog);

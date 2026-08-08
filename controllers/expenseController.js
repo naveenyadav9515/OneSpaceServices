@@ -84,6 +84,46 @@ exports.updateBudget = async (req, res, next) => {
   }
 };
 
+/**
+ * Move every transaction from one category to another.
+ *
+ * Backs both renaming and deleting a category on the client. Categories are a
+ * client-side list, but the transactions carrying them are not — without this
+ * a deleted category would leave its expenses pointing at a name that no
+ * longer exists, and they would quietly vanish from every breakdown. Pending
+ * rows are moved too, so a queued Gmail transaction does not reintroduce the
+ * dead name when it is approved.
+ */
+exports.reassignCategory = async (req, res, next) => {
+  try {
+    const from = typeof req.body.from === 'string' ? req.body.from.trim() : '';
+    const to = typeof req.body.to === 'string' ? req.body.to.trim() : '';
+
+    if (!from || !to) {
+      return res.status(400).json({ status: 'error', message: 'Both "from" and "to" categories are required.' });
+    }
+
+    if (from === to) {
+      return res.status(200).json({ status: 'success', data: { expensesUpdated: 0, pendingUpdated: 0 } });
+    }
+
+    const [expenses, pending] = await Promise.all([
+      Expense.updateMany({ user: req.user.id, category: from }, { $set: { category: to } }),
+      PendingTransaction.updateMany({ user: req.user.id, category: from }, { $set: { category: to } }),
+    ]);
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        expensesUpdated: expenses.modifiedCount || 0,
+        pendingUpdated: pending.modifiedCount || 0,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.updateExpense = async (req, res, next) => {
   try {
     const { amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
