@@ -11,6 +11,11 @@ const expenseSchema = new mongoose.Schema({
     required: [true, 'Please provide an amount'],
     min: [0, 'Amount cannot be negative'],
   },
+  title: {
+    type: String,
+    trim: true,
+    default: '',
+  },
   category: {
     type: String,
     required: [true, 'Please provide a category'],

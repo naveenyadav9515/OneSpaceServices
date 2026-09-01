@@ -49,6 +49,10 @@ app.use(correlationIdMiddleware);
 // Request Logger Middleware (Morgan + Winston)
 app.use(requestLogger);
 
+// 🔄 Time-Aware Keep-Alive: first user request of the day wakes the server ping timer.
+// Timer logic + cutoff configured in utils/keep-alive.js, initialised by index.js.
+app.use(require('./utils/keep-alive').middleware);
+
 // Routes
 app.get('/api/health', (req, res) => {
   res.json({

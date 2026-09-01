@@ -20,19 +20,7 @@ module.exports = {
   port: parseInt(process.env.PORT, 10),
   
   db: {
-    uri: (() => {
-      let uri = process.env.MONGO_URI;
-      const appEnv = (process.env.APP_ENV || process.env.NODE_ENV || 'development').toLowerCase();
-      
-      // Enforce DB isolation rules:
-      // Release uses OneSpaceDB
-      // Local/Development uses StOneSpaceDB
-      if (appEnv === 'release') {
-        return uri.replace(/\/[^/?]+(\?|$)/, '/OneSpaceDB$1');
-      } else {
-        return uri.replace(/\/[^/?]+(\?|$)/, '/StOneSpaceDB$1');
-      }
-    })(),
+    uri: process.env.MONGO_URI,
   },
   
   jwt: {

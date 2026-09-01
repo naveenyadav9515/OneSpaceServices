@@ -164,9 +164,7 @@ async function createPendingTransactionUnsafe(userId, transaction) {
     paymentMethod: transaction.paymentMethod || 'UPI',
     status: 'Pending',
     date: transaction.date,
-    notes: transaction.rawSubject
-      ? `Auto-detected from email: "${transaction.rawSubject.substring(0, 80)}"`
-      : 'Auto-detected bank transaction',
+    notes: '',
     gmailMessageId: transaction.gmailMessageId,
     source: 'gmail_auto',
     bank: transaction.bank || 'Unknown',

@@ -69,7 +69,7 @@ async function activateWatch(user) {
  * Google's watch lasts 7 days and the API is explicit that `users.watch` should
  * not be called more than about once a day per mailbox. The renewal sweep runs
  * on every process start, and this service restarts often (Render's free tier
- * sleeps it — that is what the keep-alive ping in index.js exists to fight), so
+ * sleeps it — that is what the keep-alive ping in utils/keep-alive.js exists to fight), so
  * an unconditional sweep meant one `users.watch` per connected user per restart.
  * That is a quota cost with no benefit: the existing watch was still valid.
  *

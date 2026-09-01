@@ -14,22 +14,11 @@ const server = app.listen(PORT, async () => {
   
   logger.info(`👉 Test endpoint: http://localhost:${PORT}/api/health`);
 
-  // 🔄 Self Keep-Alive: Prevents Render free tier from sleeping the server.
-  // Pings own health endpoint every 10 minutes so Render sees continuous activity.
-  // Uses RENDER_EXTERNAL_URL (auto-set by Render) to dynamically resolve the correct URL.
-  const selfUrl = process.env.RENDER_EXTERNAL_URL;
-  if (selfUrl) {
-    const KEEP_ALIVE_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-    setInterval(async () => {
-      try {
-        const res = await fetch(`${selfUrl}/api/health`);
-        logger.info(`♻️ Keep-alive ping: ${res.status}`);
-      } catch (err) {
-        logger.warn(`♻️ Keep-alive ping failed: ${err.message}`);
-      }
-    }, KEEP_ALIVE_INTERVAL_MS);
-    logger.info(`♻️ Self keep-alive enabled (every 10 minutes) → ${selfUrl}`);
-  }
+  // 🔄 Time-Aware Keep-Alive: configured in app.js middleware + utils/keep-alive.js.
+  // The wake-up middleware runs before routes so the first user request of the day
+  // activates the self-ping timer. The timer stops at 11 PM IST to save credits.
+  const keepAlive = require('./utils/keep-alive');
+  keepAlive.configure(logger);
 
   // ⚙️ Gmail sync worker + reconciliation sweep.
   //

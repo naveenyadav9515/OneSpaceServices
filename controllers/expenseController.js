@@ -10,7 +10,7 @@ exports.getExpenses = async (req, res, next) => {
     res.status(200).json({
       status: 'success',
       count: expenses.length,
-      data: expenses
+      data: expenses,
     });
   } catch (error) {
     next(error);
@@ -19,22 +19,23 @@ exports.getExpenses = async (req, res, next) => {
 
 exports.createExpense = async (req, res, next) => {
   try {
-    const { amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
+    const { title, amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
     
     const expense = await Expense.create({
       user: req.user.id,
+      title: (title && title.trim()) || '',
       amount,
       category,
       merchant,
       tags,
       notes,
       date,
-      paymentMethod
+      paymentMethod,
     });
 
     res.status(201).json({
       status: 'success',
-      data: expense
+      data: expense,
     });
   } catch (error) {
     next(error);
@@ -126,9 +127,9 @@ exports.reassignCategory = async (req, res, next) => {
 
 exports.updateExpense = async (req, res, next) => {
   try {
-    const { amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
+    const { title, amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
 
-    const updates = { amount, category, merchant, tags, notes, date, paymentMethod };
+    const updates = { title, amount, category, merchant, tags, notes, date, paymentMethod };
     // A field the client omitted should keep its stored value rather than being
     // written to undefined.
     Object.keys(updates).forEach((key) => updates[key] === undefined && delete updates[key]);
@@ -451,6 +452,7 @@ exports.processPendingTransaction = async (req, res, next) => {
     try {
       const expense = await Expense.create({
         user: req.user.id,
+        title: expenseData.title || expenseData.merchant || pending.title || pending.merchant || 'Expense',
         amount: expenseData.amount ?? pending.amount,
         merchant: expenseData.merchant || pending.merchant,
         category: expenseData.category || pending.category,
@@ -494,11 +496,12 @@ exports.simulateAutoLog = async (req, res, next) => {
       return next(AppError.notFound('Route'));
     }
 
-    const { amount, merchant, paymentMethod, date } = req.body;
+    const { title, amount, merchant, paymentMethod, date } = req.body;
     
     // Simulate parsing email to a pending transaction
     const pending = await PendingTransaction.create({
       user: req.user.id,
+      title: title || merchant || 'Simulated Merchant',
       amount: amount || Math.floor(Math.random() * 1000) + 100,
       merchant: merchant || 'Simulated Merchant',
       paymentMethod: paymentMethod || 'UPI',

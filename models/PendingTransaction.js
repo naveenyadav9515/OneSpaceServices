@@ -10,6 +10,11 @@ const pendingTransactionSchema = new mongoose.Schema({
     type: Number,
     required: [true, 'Please provide an amount'],
   },
+  title: {
+    type: String,
+    trim: true,
+    default: '',
+  },
   merchant: {
     type: String,
     required: [true, 'Please provide a merchant or reason'],
