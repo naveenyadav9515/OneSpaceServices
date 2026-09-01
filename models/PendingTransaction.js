@@ -22,12 +22,12 @@ const pendingTransactionSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ['Food', 'Transport', 'Shopping', 'Utilities', 'Entertainment', 'Health', 'Other'],
+    trim: true,
     default: 'Other',
   },
   paymentMethod: {
     type: String,
-    enum: ['Cash', 'Credit Card', 'Debit Card', 'UPI', 'Net Banking', 'Other'],
+    trim: true,
     default: 'UPI',
   },
   date: {

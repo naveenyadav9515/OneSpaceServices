@@ -19,7 +19,7 @@ const expenseSchema = new mongoose.Schema({
   category: {
     type: String,
     required: [true, 'Please provide a category'],
-    enum: ['Food', 'Transport', 'Shopping', 'Utilities', 'Entertainment', 'Health', 'Other'],
+    trim: true,
     default: 'Other',
   },
   merchant: {
@@ -42,7 +42,7 @@ const expenseSchema = new mongoose.Schema({
   },
   paymentMethod: {
     type: String,
-    enum: ['Cash', 'Credit Card', 'Debit Card', 'UPI', 'Net Banking', 'Other'],
+    trim: true,
     default: 'UPI',
   },
   gmailMessageId: {
