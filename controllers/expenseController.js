@@ -122,8 +122,8 @@ exports.getCategories = async (req, res, next) => {
 
     let categories = user.expenseCategories;
 
-    // If never initialized on the user document, seed with defaults + any categories present in user's transactions
-    if (!categories || categories.length === 0) {
+    // Only seed with initial defaults if expenseCategories is never set (null / undefined)
+    if (categories === undefined || categories === null) {
       const [expenseCats, pendingCats] = await Promise.all([
         Expense.distinct('category', { user: req.user.id }),
         PendingTransaction.distinct('category', { user: req.user.id }),
@@ -150,11 +150,19 @@ exports.getCategories = async (req, res, next) => {
       });
 
       categories = initial;
+
+      // Persist initial array to database so subsequent updates/deletes are permanently preserved
+      await User.findByIdAndUpdate(req.user.id, { $set: { expenseCategories: initial } });
     }
+
+    // Ensure 'Other' is always present and placed at the very end
+    const filtered = (categories || []).filter((c) => c && c.name && c.name.toLowerCase() !== 'other');
+    const otherCat = (categories || []).find((c) => c && c.name && c.name.toLowerCase() === 'other') || { name: 'Other', shortName: '' };
+    const result = [...filtered, otherCat];
 
     res.status(200).json({
       status: 'success',
-      data: categories,
+      data: result,
     });
   } catch (error) {
     next(error);
@@ -362,7 +370,7 @@ exports.deleteExpense = async (req, res, next) => {
     
     const topCategories = Object.keys(categoryTotals)
       .map(cat => ({
-        name: cat === 'Food' ? 'Food & Dining' : cat,
+        name: cat,
         amount: categoryTotals[cat],
         percentage: monthlySpend === 0 ? 0 : Math.round((categoryTotals[cat] / monthlySpend) * 1000) / 10
       }))
@@ -495,12 +503,12 @@ exports.deleteExpense = async (req, res, next) => {
     // ── 10. Insight ──
     const prevCategoryTotals = {};
     prevMonthExpenses.forEach(e => {
-      const catName = e.category === 'Food' ? 'Food & Dining' : e.category;
+      const catName = e.category || 'Other';
       prevCategoryTotals[catName] = (prevCategoryTotals[catName] || 0) + e.amount;
     });
 
-    const topCat = topCategories[0]?.name || 'Food & Dining';
-    const topCatThisMonth = categoryTotals[topCat === 'Food & Dining' ? 'Food' : topCat] || 0;
+    const topCat = topCategories[0]?.name || 'Other';
+    const topCatThisMonth = categoryTotals[topCat] || 0;
     const topCatPrevMonth = prevCategoryTotals[topCat] || 0;
     
     let insightPct = 0;
