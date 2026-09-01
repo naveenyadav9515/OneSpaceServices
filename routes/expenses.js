@@ -31,6 +31,7 @@ router.route('/')
   .get(expenseController.getExpenses);
 
 router.route('/:id')
+  .get(expenseController.getExpenseById)
   .put(expenseController.updateExpense)
   .delete(expenseController.deleteExpense);
 

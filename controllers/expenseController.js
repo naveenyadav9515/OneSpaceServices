@@ -17,6 +17,21 @@ exports.getExpenses = async (req, res, next) => {
   }
 };
 
+exports.getExpenseById = async (req, res, next) => {
+  try {
+    const expense = await Expense.findOne({ _id: req.params.id, user: req.user.id });
+    if (!expense) {
+      return res.status(404).json({ status: 'error', message: 'Expense not found' });
+    }
+    res.status(200).json({
+      status: 'success',
+      data: expense,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.createExpense = async (req, res, next) => {
   try {
     const { title, amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
