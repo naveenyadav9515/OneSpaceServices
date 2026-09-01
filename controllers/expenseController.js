@@ -352,7 +352,7 @@ exports.deleteExpense = async (req, res, next) => {
       budgetUser?.monthlyBudget != null && budgetUser.monthlyBudget > 0
         ? budgetUser.monthlyBudget
         : config.app.expenseMonthlyBudget;
-    const budgetUsedPct = Math.min(100, Math.round((monthlySpend / budgetTarget) * 100));
+    const budgetUsedPct = budgetTarget > 0 ? Math.round((monthlySpend / budgetTarget) * 100) : 0;
 
     // ── 6. Top Categories (from this month only) ──
     const categoryTotals = {};
