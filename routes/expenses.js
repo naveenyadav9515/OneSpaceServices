@@ -10,6 +10,8 @@ router.use(protect);
 router.get('/summary', expenseController.getExpenseSummary);
 // Declared before '/:id' so these are never swallowed as an expense id.
 router.patch('/budget', expenseController.updateBudget);
+router.get('/categories', expenseController.getCategories);
+router.put('/categories', expenseController.updateCategories);
 router.patch('/categories/reassign', expenseController.reassignCategory);
 
 router.get('/pending', expenseController.getPendingTransactions);

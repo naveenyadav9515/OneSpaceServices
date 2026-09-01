@@ -85,6 +85,104 @@ exports.updateBudget = async (req, res, next) => {
   }
 };
 
+const DEFAULT_CATEGORIES = [
+  'Food & Dining',
+  'Transport',
+  'Shopping',
+  'Utilities',
+  'Entertainment',
+  'Health',
+  'Other',
+];
+
+/**
+ * Get user's category list synchronized with MongoDB.
+ */
+exports.getCategories = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select('expenseCategories').lean();
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'User not found' });
+    }
+
+    let categories = user.expenseCategories;
+
+    // If never initialized on the user document, seed with defaults + any categories present in user's transactions
+    if (!categories || categories.length === 0) {
+      const [expenseCats, pendingCats] = await Promise.all([
+        Expense.distinct('category', { user: req.user.id }),
+        PendingTransaction.distinct('category', { user: req.user.id }),
+      ]);
+
+      const seen = new Set();
+      const initial = [];
+
+      // 1. Add defaults
+      DEFAULT_CATEGORIES.forEach((name) => {
+        seen.add(name.toLowerCase());
+        initial.push({ name, shortName: '' });
+      });
+
+      // 2. Discover any custom categories from actual user expenses
+      [...expenseCats, ...pendingCats].forEach((cat) => {
+        if (cat && typeof cat === 'string' && cat.trim().length > 0) {
+          const trimmed = cat.trim();
+          if (!seen.has(trimmed.toLowerCase())) {
+            seen.add(trimmed.toLowerCase());
+            initial.push({ name: trimmed, shortName: '' });
+          }
+        }
+      });
+
+      categories = initial;
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: categories,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Update user's category list across all devices.
+ */
+exports.updateCategories = async (req, res, next) => {
+  try {
+    const { categories } = req.body;
+    if (!Array.isArray(categories)) {
+      return res.status(400).json({ status: 'error', message: 'Categories must be an array' });
+    }
+
+    const sanitized = categories
+      .filter((c) => c && typeof c.name === 'string' && c.name.trim().length > 0)
+      .map((c) => ({
+        name: c.name.trim(),
+        shortName: typeof c.shortName === 'string' ? c.shortName.trim() : '',
+      }));
+
+    const hasOther = sanitized.some((c) => c.name.toLowerCase() === 'other');
+    if (!hasOther) {
+      sanitized.push({ name: 'Other', shortName: '' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $set: { expenseCategories: sanitized } },
+      { new: true, runValidators: true }
+    ).select('expenseCategories').lean();
+
+    res.status(200).json({
+      status: 'success',
+      data: user.expenseCategories,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 /**
  * Move every transaction from one category to another.
  *

@@ -94,6 +94,13 @@ const userSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
+  expenseCategories: {
+    type: [{
+      name: { type: String, required: true, trim: true },
+      shortName: { type: String, trim: true, default: '' },
+    }],
+    default: undefined,
+  },
   gmailWatchExpiry: {
     type: Date,
     default: null,
