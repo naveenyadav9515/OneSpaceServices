@@ -273,9 +273,7 @@ exports.deleteExpense = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-};
-
-exports.getExpenseSummary = async (req, res, next) => {
+};exports.getExpenseSummary = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const now = new Date();
@@ -283,26 +281,57 @@ exports.getExpenseSummary = async (req, res, next) => {
     // Convert current UTC time to IST offset (UTC+5:30) for accurate boundary checks
     const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
     const istNow = new Date(utcTime + (3600000 * 5.5));
-    const year = istNow.getFullYear();
-    const month = istNow.getMonth(); // 0-indexed
-    
+    const currentYear = istNow.getFullYear();
+    const currentMonth = istNow.getMonth(); // 0-indexed
+
+    // Determine target month and year from query params if provided
+    let year = currentYear;
+    let month = currentMonth; // 0-indexed
+
+    if (req.query.year && !isNaN(parseInt(req.query.year, 10))) {
+      year = parseInt(req.query.year, 10);
+    }
+    if (req.query.month && !isNaN(parseInt(req.query.month, 10))) {
+      const qm = parseInt(req.query.month, 10);
+      if (qm >= 1 && qm <= 12) {
+        month = qm - 1; // Convert 1-12 to 0-11
+      }
+    }
+
+    const isCurrentMonth = year === currentYear && month === currentMonth;
+    const isPastMonth = year < currentYear || (year === currentYear && month < currentMonth);
+    const isFutureMonth = year > currentYear || (year === currentYear && month > currentMonth);
+
     // ── 1. Time Boundaries (in IST, stored as UTC in Mongoose) ──
-    const startOfMonth = new Date(`${year}-${String(month + 1).padStart(2, '0')}-01T00:00:00.000+05:30`);
+    const monthNumStr = String(month + 1).padStart(2, '0');
+    const startOfMonth = new Date(`${year}-${monthNumStr}-01T00:00:00.000+05:30`);
     const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const endOfMonth = new Date(`${year}-${String(month + 1).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}T23:59:59.999+05:30`);
+    const endOfMonth = new Date(`${year}-${monthNumStr}-${String(daysInMonth).padStart(2, '0')}T23:59:59.999+05:30`);
     
-    const daysPassed = Math.max(1, istNow.getDate());
-    const daysLeft = Math.max(0, daysInMonth - daysPassed);
+    let daysPassed = daysInMonth;
+    let daysLeft = 0;
+    let dayOfMonth = daysInMonth;
+
+    if (isCurrentMonth) {
+      daysPassed = Math.max(1, istNow.getDate());
+      daysLeft = Math.max(0, daysInMonth - daysPassed);
+      dayOfMonth = istNow.getDate();
+    } else if (isFutureMonth) {
+      daysPassed = 0;
+      daysLeft = daysInMonth;
+      dayOfMonth = 1;
+    }
 
     // ── 2. Previous month boundaries (for trend comparison) ──
     const prevMonth = month === 0 ? 11 : month - 1;
     const prevYear = month === 0 ? year - 1 : year;
     const prevDaysInMonth = new Date(prevYear, prevMonth + 1, 0).getDate();
+    const prevMonthNumStr = String(prevMonth + 1).padStart(2, '0');
 
-    const startOfPrevMonth = new Date(`${prevYear}-${String(prevMonth + 1).padStart(2, '0')}-01T00:00:00.000+05:30`);
-    const endOfPrevMonth = new Date(`${prevYear}-${String(prevMonth + 1).padStart(2, '0')}-${String(prevDaysInMonth).padStart(2, '0')}T23:59:59.999+05:30`);
+    const startOfPrevMonth = new Date(`${prevYear}-${prevMonthNumStr}-01T00:00:00.000+05:30`);
+    const endOfPrevMonth = new Date(`${prevYear}-${prevMonthNumStr}-${String(prevDaysInMonth).padStart(2, '0')}T23:59:59.999+05:30`);
 
-    // ── 3. Fetch ONLY relevant expenses using MongoDB queries (not all expenses!) ──
+    // ── 3. Fetch ONLY relevant expenses using MongoDB queries ──
     const thisMonthExpenses = await Expense.find({
       user: userId,
       date: { $gte: startOfMonth, $lte: endOfMonth }
@@ -318,8 +347,6 @@ exports.getExpenseSummary = async (req, res, next) => {
     const prevMonthSpend = prevMonthExpenses.reduce((sum, e) => sum + e.amount, 0);
 
     // ── 5. Budget calculations ──
-    // The user's own target. Accounts created before this was configurable have
-    // null and keep the old shared default until they set one themselves.
     const budgetUser = await User.findById(userId).select('monthlyBudget').lean();
     const budgetTarget =
       budgetUser?.monthlyBudget != null && budgetUser.monthlyBudget > 0
@@ -342,79 +369,86 @@ exports.getExpenseSummary = async (req, res, next) => {
       .sort((a, b) => b.amount - a.amount)
       .slice(0, 5);
 
-    // ── 7. Chart Data — the last 7 days in IST, ending today ──
-    // A rolling window, so the rightmost column is always the present day.
-    //
-    // Every date here is handled through a UTC "shadow": a Date whose UTC
-    // fields carry the IST calendar Y/M/D. The previous version stepped through
-    // absolute instants instead, and IST midnight is 18:30 UTC on the *previous*
-    // day — so on a UTC host (which is what we deploy to) getDate() and an
-    // unqualified toLocaleDateString() both read the day before. That shifted
-    // the whole window back one day, dropping today off the chart, and pinned
-    // each weekday label to the wrong date. Date.UTC() also rolls months and
-    // years over on its own, so no boundary arithmetic is needed.
+    // ── 7. Chart Data ──
     const IST_OFFSET_MS = 5.5 * 3600000;
-    const istShadow = (offsetDays) =>
-      new Date(Date.UTC(istNow.getFullYear(), istNow.getMonth(), istNow.getDate() + offsetDays));
-    /** The real instant IST midnight begins, for a shadow date. */
-    const istMidnight = (shadow) => new Date(shadow.getTime() - IST_OFFSET_MS);
-
-    const startOfChartRange = istMidnight(istShadow(-6));
-    const endOfChartRange = new Date(istMidnight(istShadow(1)).getTime() - 1);
-
-    const weekExpenses = await Expense.find({
-      user: userId,
-      date: { $gte: startOfChartRange, $lte: endOfChartRange }
-    });
+    const istMidnight = (d) => new Date(d.getTime() - IST_OFFSET_MS);
 
     const chartLabels = [];
     const chartData = [];
-    /**
-     * Per-day detail for the trend chart. `labels`/`data` above stay as they
-     * are, but a weekday initial alone can't say *which* Saturday, and the
-     * client needs to know which day is today and which are still to come so
-     * it can mark them rather than drawing them as genuine zeroes.
-     */
     const chartDays = [];
     let weeklyTotal = 0;
 
-    // -6 … 0, so the last column is today.
-    for (let offset = -6; offset <= 0; offset++) {
-      const shadow = istShadow(offset);
-      const dStart = istMidnight(shadow);
-      const dEnd = new Date(istMidnight(istShadow(offset + 1)).getTime() - 1);
+    if (isCurrentMonth) {
+      // Rolling 7 days ending today
+      const istShadow = (offsetDays) =>
+        new Date(Date.UTC(istNow.getFullYear(), istNow.getMonth(), istNow.getDate() + offsetDays));
 
-      const dayTotal = weekExpenses
-        .filter(e => e.date >= dStart && e.date <= dEnd)
-        .reduce((sum, e) => sum + e.amount, 0);
+      const startOfChartRange = istMidnight(istShadow(-6));
+      const endOfChartRange = new Date(istMidnight(istShadow(1)).getTime() - 1);
 
-      // Formatted off the shadow in UTC, so the weekday always belongs to the
-      // IST date printed beside it, whatever zone the host runs in.
-      const label = shadow.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
-
-      chartLabels.push(label);
-      chartData.push(dayTotal);
-      chartDays.push({
-        label,
-        dayOfMonth: shadow.getUTCDate(),
-        month: shadow.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }),
-        date: dStart.toISOString(),
-        amount: dayTotal,
-        isToday: offset === 0,
-        isFuture: false,
+      const weekExpenses = await Expense.find({
+        user: userId,
+        date: { $gte: startOfChartRange, $lte: endOfChartRange }
       });
 
-      weeklyTotal += dayTotal;
+      for (let offset = -6; offset <= 0; offset++) {
+        const shadow = istShadow(offset);
+        const dStart = istMidnight(shadow);
+        const dEnd = new Date(istMidnight(istShadow(offset + 1)).getTime() - 1);
+
+        const dayTotal = weekExpenses
+          .filter(e => e.date >= dStart && e.date <= dEnd)
+          .reduce((sum, e) => sum + e.amount, 0);
+
+        const label = shadow.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+
+        chartLabels.push(label);
+        chartData.push(dayTotal);
+        chartDays.push({
+          label,
+          dayOfMonth: shadow.getUTCDate(),
+          month: shadow.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }),
+          date: dStart.toISOString(),
+          amount: dayTotal,
+          isToday: offset === 0,
+          isFuture: false,
+        });
+
+        weeklyTotal += dayTotal;
+      }
+    } else {
+      // Past or other month: 7 evenly spaced sample days / weeks across the month
+      const sampleDays = [1, Math.min(5, daysInMonth), Math.min(10, daysInMonth), Math.min(15, daysInMonth), Math.min(20, daysInMonth), Math.min(25, daysInMonth), daysInMonth];
+      for (const d of sampleDays) {
+        const shadow = new Date(Date.UTC(year, month, d));
+        const dStart = istMidnight(shadow);
+        const dEnd = new Date(istMidnight(new Date(Date.UTC(year, month, d + 1))).getTime() - 1);
+
+        const dayTotal = thisMonthExpenses
+          .filter(e => e.date >= dStart && e.date <= dEnd)
+          .reduce((sum, e) => sum + e.amount, 0);
+
+        const label = `D${d}`;
+        chartLabels.push(label);
+        chartData.push(dayTotal);
+        chartDays.push({
+          label,
+          dayOfMonth: d,
+          month: shadow.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' }),
+          date: dStart.toISOString(),
+          amount: dayTotal,
+          isToday: false,
+          isFuture: isFutureMonth,
+        });
+        weeklyTotal += dayTotal;
+      }
     }
 
-    // ── 7b. Month-to-date daily totals ──
-    // The projection chart plots the month's cumulative spend against the
-    // budget, which needs a per-day series rather than a single total. Built
-     // through the same IST shadow dates as the weekly chart above.
+    // ── 7b. Month Daily totals ──
     const monthDaily = [];
     for (let day = 1; day <= daysInMonth; day++) {
-      const dayStart = istMidnight(new Date(Date.UTC(istNow.getFullYear(), istNow.getMonth(), day)));
-      const dayEnd = new Date(istMidnight(new Date(Date.UTC(istNow.getFullYear(), istNow.getMonth(), day + 1))).getTime() - 1);
+      const dayStart = istMidnight(new Date(Date.UTC(year, month, day)));
+      const dayEnd = new Date(istMidnight(new Date(Date.UTC(year, month, day + 1))).getTime() - 1);
 
       monthDaily.push(
         thisMonthExpenses
@@ -423,24 +457,42 @@ exports.getExpenseSummary = async (req, res, next) => {
       );
     }
 
-    // ── 8. Real trend calculation ──
-    // Compare current month's daily avg with previous month's daily avg
+    // ── 8. Trend calculation ──
     const prevDailyAvg = prevMonthSpend / prevDaysInMonth;
-    const currentDailyAvg = monthlySpend / daysPassed;
+    const currentDailyAvg = daysPassed > 0 ? monthlySpend / daysPassed : 0;
     
     let trendPct = 0;
     let trendStatus = 'flat';
-    if (prevDailyAvg > 0) {
+    if (prevDailyAvg > 0 && currentDailyAvg > 0) {
       trendPct = Math.round(((currentDailyAvg - prevDailyAvg) / prevDailyAvg) * 100);
       trendStatus = trendPct > 0 ? 'up' : trendPct < 0 ? 'down' : 'flat';
       trendPct = Math.abs(trendPct);
     }
 
     // ── 9. Forecast ──
-    const estimatedSpend = Math.round(currentDailyAvg * daysInMonth);
-    const isHealthy = estimatedSpend <= budgetTarget;
+    let estimatedSpend = monthlySpend;
+    let statusText = '';
+    let statusColor = 'var(--lm-color-success)';
+
+    if (isPastMonth) {
+      estimatedSpend = monthlySpend;
+      const isOver = monthlySpend > budgetTarget;
+      statusText = isOver 
+        ? `Closed at ₹${monthlySpend.toLocaleString('en-IN')} (₹${(monthlySpend - budgetTarget).toLocaleString('en-IN')} over budget).`
+        : `Closed at ₹${monthlySpend.toLocaleString('en-IN')} (₹${(budgetTarget - monthlySpend).toLocaleString('en-IN')} saved).`;
+      statusColor = isOver ? 'var(--lm-color-error)' : 'var(--lm-color-success)';
+    } else if (isCurrentMonth) {
+      estimatedSpend = Math.round(currentDailyAvg * daysInMonth);
+      const isHealthy = estimatedSpend <= budgetTarget;
+      statusText = isHealthy ? "You're on track to stay within budget." : "You're projected to exceed your budget.";
+      statusColor = isHealthy ? 'var(--lm-color-success)' : 'var(--lm-color-error)';
+    } else {
+      estimatedSpend = 0;
+      statusText = 'Upcoming month';
+      statusColor = 'var(--lm-color-text-secondary)';
+    }
     
-    // ── 10. Real Insight — find category with highest spend vs prev month ──
+    // ── 10. Insight ──
     const prevCategoryTotals = {};
     prevMonthExpenses.forEach(e => {
       const catName = e.category === 'Food' ? 'Food & Dining' : e.category;
@@ -456,46 +508,55 @@ exports.getExpenseSummary = async (req, res, next) => {
     if (topCatPrevMonth > 0) {
       insightPct = Math.round(((topCatThisMonth - topCatPrevMonth) / topCatPrevMonth) * 100);
       if (insightPct > 0) {
-        insightText = `You're spending ${insightPct}% more on ${topCat} compared to last month.`;
+        insightText = `Spent ${insightPct}% more on ${topCat} compared to previous month.`;
       } else if (insightPct < 0) {
-        insightText = `Great job! You've reduced ${topCat} spending by ${Math.abs(insightPct)}% vs last month.`;
+        insightText = `Reduced ${topCat} spending by ${Math.abs(insightPct)}% vs previous month.`;
       } else {
-        insightText = `Your ${topCat} spending is consistent with last month.`;
+        insightText = `${topCat} spending was consistent with previous month.`;
       }
     } else if (topCatThisMonth > 0) {
-      insightText = `${topCat} is your top category this month at ₹${topCatThisMonth.toLocaleString('en-IN')}.`;
+      insightText = `${topCat} is top category at ₹${topCatThisMonth.toLocaleString('en-IN')}.`;
     } else {
-      insightText = 'Start logging expenses to get spending insights!';
+      insightText = 'No expense records found for this period.';
     }
+
+    const monthDate = new Date(year, month, 1);
+    const monthName = monthDate.toLocaleDateString('en-US', { month: 'long' });
 
     res.status(200).json({
       status: 'success',
       data: {
+        month: month + 1,
+        year,
+        monthName,
+        isCurrentMonth,
+        isPastMonth,
+        isFutureMonth,
         monthlySpend,
         budgetTarget,
         budgetUsedPct,
-        budgetStatus: isHealthy ? 'Healthy' : 'At Risk',
+        budgetStatus: monthlySpend <= budgetTarget ? 'Healthy' : 'At Risk',
         spent: monthlySpend,
         available: Math.max(0, budgetTarget - monthlySpend),
         daysLeft,
         daysInMonth,
+        dayOfMonth,
         topCategories,
         spendingTrend: {
           labels: chartLabels,
           data: chartData,
           days: chartDays,
-          weekStart: startOfChartRange.toISOString(),
-          weekEnd: endOfChartRange.toISOString(),
+          weekStart: startOfMonth.toISOString(),
+          weekEnd: endOfMonth.toISOString(),
           avgPerWeek: Math.round(weeklyTotal),
           trendPct,
           trendStatus
         },
         monthDaily,
-        dayOfMonth: istNow.getDate(),
         forecast: {
           estimatedSpend,
-          statusText: isHealthy ? "You're on track to stay within budget." : "You're projected to exceed your budget.",
-          statusColor: isHealthy ? 'var(--lm-color-success)' : 'var(--lm-color-error)'
+          statusText,
+          statusColor
         },
         insight: {
           highlightPct: `${Math.abs(insightPct)}%`,
