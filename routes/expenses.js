@@ -16,6 +16,7 @@ router.patch('/categories/reassign', expenseController.reassignCategory);
 
 router.get('/pending', expenseController.getPendingTransactions);
 router.post('/pending/simulate', expenseController.simulateAutoLog);
+router.post('/pending/merge', expenseController.mergePendingTransactions);
 router.post('/pending/:id', expenseController.processPendingTransaction);
 // Throttled per user: each call starts a Gmail scan, so button-mashing spends
 // Google quota rather than ours. Mounted after `protect` so req.user exists.
@@ -25,6 +26,8 @@ router.post('/sync', syncLimiter, expenseController.syncExpenses);
 router.get('/automation/status', expenseController.getAutomationStatus);
 router.patch('/automation/settings', expenseController.updateAutomationSettings);
 router.post('/automation/disconnect', expenseController.disconnectGmail);
+
+router.post('/merge', expenseController.mergeExpenses);
 
 router.route('/')
   .post(expenseController.createExpense)

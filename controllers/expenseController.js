@@ -959,3 +959,195 @@ exports.disconnectGmail = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * Merge multiple expenses into a single primary expense.
+ * - Primary expense retains master metadata (title, category, merchant, date, paymentMethod).
+ * - Amount is summed: primary.amount + sum(mergeExpenses.amount).
+ * - Tags are combined uniquely.
+ * - Notes are merged: primary.notes (plus appended merged notes if any).
+ * - Secondary expenses are permanently deleted from database.
+ */
+exports.mergeExpenses = async (req, res, next) => {
+  try {
+    const { primaryId, mergeIds } = req.body;
+
+    if (!primaryId || !Array.isArray(mergeIds) || mergeIds.length === 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Please provide a primary transaction ID and at least one secondary transaction to merge.'
+      });
+    }
+
+    const cleanMergeIds = [...new Set(mergeIds.filter(id => id && String(id) !== String(primaryId)))];
+    if (cleanMergeIds.length === 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Cannot merge a transaction into itself.'
+      });
+    }
+
+    const primaryExpense = await Expense.findOne({ _id: primaryId, user: req.user.id });
+    if (!primaryExpense) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Primary expense not found.'
+      });
+    }
+
+    const secondaryExpenses = await Expense.find({
+      _id: { $in: cleanMergeIds },
+      user: req.user.id
+    });
+
+    if (secondaryExpenses.length === 0) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'No matching secondary expenses found to merge.'
+      });
+    }
+
+    // Calculate sum of amounts
+    const additionalAmount = secondaryExpenses.reduce((sum, exp) => sum + (Number(exp.amount) || 0), 0);
+    const newTotalAmount = Math.round((Number(primaryExpense.amount) + additionalAmount) * 100) / 100;
+
+    // Combine tags uniquely
+    const allTags = new Set(primaryExpense.tags || []);
+    secondaryExpenses.forEach(exp => {
+      (exp.tags || []).forEach(t => allTags.add(t));
+    });
+
+    // Combine notes
+    let combinedNotes = (primaryExpense.notes || '').trim();
+    const secondaryNotes = secondaryExpenses
+      .map(exp => {
+        const title = exp.title || exp.merchant || 'Expense';
+        const notes = (exp.notes || '').trim();
+        return notes ? `[Merged ${title} (₹${exp.amount})]: ${notes}` : `[Merged ${title} (₹${exp.amount})]`;
+      })
+      .join('; ');
+
+    if (secondaryNotes) {
+      combinedNotes = combinedNotes ? `${combinedNotes}\n${secondaryNotes}` : secondaryNotes;
+    }
+
+    // Update primary
+    primaryExpense.amount = newTotalAmount;
+    primaryExpense.tags = Array.from(allTags);
+    primaryExpense.notes = combinedNotes;
+    primaryExpense.isManuallyEdited = true;
+    primaryExpense.lastEditedAt = new Date();
+    await primaryExpense.save();
+
+    // Delete secondary expenses
+    const deletedIds = secondaryExpenses.map(s => s._id);
+    await Expense.deleteMany({ _id: { $in: deletedIds }, user: req.user.id });
+
+    return res.status(200).json({
+      status: 'success',
+      message: `Successfully merged ${secondaryExpenses.length} transaction(s) into primary transaction.`,
+      data: primaryExpense,
+      mergedCount: secondaryExpenses.length
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Merge multiple pending transactions into a primary pending transaction.
+ * - Primary pending transaction retains master metadata.
+ * - Amount is summed: primary.amount + sum(mergePending.amount).
+ * - Secondary pending transactions are marked as Rejected so they leave the pending review queue.
+ */
+exports.mergePendingTransactions = async (req, res, next) => {
+  try {
+    const { primaryId, mergeIds } = req.body;
+
+    if (!primaryId || !Array.isArray(mergeIds) || mergeIds.length === 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Please provide a primary transaction ID and at least one secondary transaction to merge.'
+      });
+    }
+
+    const cleanMergeIds = [...new Set(mergeIds.filter(id => id && String(id) !== String(primaryId)))];
+    if (cleanMergeIds.length === 0) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Cannot merge a transaction into itself.'
+      });
+    }
+
+    const primaryPending = await PendingTransaction.findOne({
+      _id: primaryId,
+      user: req.user.id,
+      status: 'Pending'
+    });
+
+    if (!primaryPending) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Primary pending transaction not found or already processed.'
+      });
+    }
+
+    const secondaryPending = await PendingTransaction.find({
+      _id: { $in: cleanMergeIds },
+      user: req.user.id,
+      status: 'Pending'
+    });
+
+    if (secondaryPending.length === 0) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'No matching secondary pending transactions found to merge.'
+      });
+    }
+
+    // Sum amounts
+    const additionalAmount = secondaryPending.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const newTotalAmount = Math.round((Number(primaryPending.amount) + additionalAmount) * 100) / 100;
+
+    // Combine tags and notes
+    const allTags = new Set(primaryPending.tags || []);
+    secondaryPending.forEach(p => {
+      (p.tags || []).forEach(t => allTags.add(t));
+    });
+
+    let combinedNotes = (primaryPending.notes || '').trim();
+    const secondaryNotes = secondaryPending
+      .map(p => {
+        const title = p.title || p.merchant || 'Pending Transaction';
+        const notes = (p.notes || '').trim();
+        return notes ? `[Merged ${title} (₹${p.amount})]: ${notes}` : `[Merged ${title} (₹${p.amount})]`;
+      })
+      .join('; ');
+
+    if (secondaryNotes) {
+      combinedNotes = combinedNotes ? `${combinedNotes}\n${secondaryNotes}` : secondaryNotes;
+    }
+
+    // Update primary pending
+    primaryPending.amount = newTotalAmount;
+    primaryPending.tags = Array.from(allTags);
+    primaryPending.notes = combinedNotes;
+    await primaryPending.save();
+
+    // Mark secondary pending transactions as Rejected so they are resolved and leave the pending review queue
+    const secondaryIds = secondaryPending.map(s => s._id);
+    await PendingTransaction.updateMany(
+      { _id: { $in: secondaryIds }, user: req.user.id },
+      { $set: { status: 'Rejected' } }
+    );
+
+    return res.status(200).json({
+      status: 'success',
+      message: `Successfully merged ${secondaryPending.length} pending transaction(s) into primary.`,
+      data: primaryPending,
+      mergedCount: secondaryPending.length
+    });
+  } catch (error) {
+    next(error);
+  }
+};

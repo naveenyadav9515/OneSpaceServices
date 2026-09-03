@@ -74,7 +74,9 @@ expenseSchema.pre('save', function (next) {
   if (this.gmailMessageId && (!this.source || this.source === 'manual')) {
     this.source = 'gmail_auto';
   }
-  next();
+  if (typeof next === 'function') {
+    next();
+  }
 });
 
 
