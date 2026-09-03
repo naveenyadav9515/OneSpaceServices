@@ -6,7 +6,11 @@ const AppError = require('../utils/AppError');
 
 exports.getExpenses = async (req, res, next) => {
   try {
-    const expenses = await Expense.find({ user: req.user.id }).sort({ date: -1 });
+    const rawExpenses = await Expense.find({ user: req.user.id }).sort({ date: -1 }).lean();
+    const expenses = rawExpenses.map((exp) => ({
+      ...exp,
+      source: exp.source && exp.source !== 'manual' ? exp.source : (exp.gmailMessageId ? 'gmail_auto' : 'manual'),
+    }));
     res.status(200).json({
       status: 'success',
       count: expenses.length,
@@ -46,6 +50,8 @@ exports.createExpense = async (req, res, next) => {
       notes,
       date,
       paymentMethod,
+      source: 'manual',
+      isManuallyEdited: false,
     });
 
     res.status(201).json({
@@ -254,6 +260,10 @@ exports.updateExpense = async (req, res, next) => {
     // A field the client omitted should keep its stored value rather than being
     // written to undefined.
     Object.keys(updates).forEach((key) => updates[key] === undefined && delete updates[key]);
+
+    // Track that this transaction was modified manually
+    updates.isManuallyEdited = true;
+    updates.lastEditedAt = new Date();
 
     const expense = await Expense.findOneAndUpdate(
       { _id: req.params.id, user: req.user.id },
@@ -643,6 +653,8 @@ exports.processPendingTransaction = async (req, res, next) => {
         tags: expenseData.tags || pending.tags,
         notes: expenseData.notes || pending.notes,
         gmailMessageId: pending.gmailMessageId,
+        source: pending.source || (pending.gmailMessageId ? 'gmail_auto' : 'manual'),
+        isManuallyEdited: false,
       });
 
       return res.status(201).json({ status: 'success', data: expense });

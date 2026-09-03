@@ -49,10 +49,34 @@ const expenseSchema = new mongoose.Schema({
     type: String,
     default: null,
     index: true,
-  }
+  },
+  source: {
+    type: String,
+    enum: ['gmail_auto', 'manual', 'simulated'],
+    default: 'manual',
+    index: true,
+  },
+  isManuallyEdited: {
+    type: Boolean,
+    default: false,
+  },
+  lastEditedAt: {
+    type: Date,
+    default: null,
+  },
 }, {
   timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true },
 });
+
+expenseSchema.pre('save', function (next) {
+  if (this.gmailMessageId && (!this.source || this.source === 'manual')) {
+    this.source = 'gmail_auto';
+  }
+  next();
+});
+
 
 /**
  * One Gmail message can only ever become one expense per user.
