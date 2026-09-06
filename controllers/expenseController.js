@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Expense = require('../models/Expense');
 const PendingTransaction = require('../models/PendingTransaction');
 const User = require('../models/User');
@@ -9,7 +10,12 @@ exports.getExpenses = async (req, res, next) => {
     const rawExpenses = await Expense.find({ user: req.user.id }).sort({ date: -1 }).lean();
     const expenses = rawExpenses.map((exp) => ({
       ...exp,
-      source: exp.source && exp.source !== 'manual' ? exp.source : (exp.gmailMessageId ? 'gmail_auto' : 'manual'),
+      source:
+        exp.source && exp.source !== 'manual'
+          ? exp.source
+          : exp.gmailMessageId
+            ? 'gmail_auto'
+            : 'manual',
     }));
     res.status(200).json({
       status: 'success',
@@ -39,7 +45,7 @@ exports.getExpenseById = async (req, res, next) => {
 exports.createExpense = async (req, res, next) => {
   try {
     const { title, amount, category, merchant, tags, notes, date, paymentMethod } = req.body;
-    
+
     const expense = await Expense.create({
       user: req.user.id,
       title: (title && title.trim()) || '',
@@ -93,7 +99,7 @@ exports.updateBudget = async (req, res, next) => {
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { $set: { monthlyBudget: Math.round(value) } },
-      { new: true, runValidators: true },
+      { new: true, runValidators: true }
     ).select('monthlyBudget');
 
     if (!user) {
@@ -107,14 +113,130 @@ exports.updateBudget = async (req, res, next) => {
 };
 
 const DEFAULT_CATEGORIES = [
-  'Food & Dining',
-  'Transport',
-  'Shopping',
-  'Utilities',
-  'Entertainment',
-  'Health',
-  'Other',
+  { name: 'BL-Home', shortName: 'Bl-Home', icon: 'cottage' },
+  { name: 'Bills and rents', shortName: 'Bills', icon: 'receipt_long' },
+  { name: 'Credit Card expenses', shortName: 'CCE', icon: 'credit_card' },
+  { name: 'Friends and meet-ups', shortName: 'Frds&met', icon: 'groups' },
+  { name: 'Kitchen Utilities', shortName: 'Kitchen', icon: 'kitchen' },
+  { name: 'Miscellaneous expenses', shortName: 'Ml-exp', icon: 'widgets' },
+  { name: 'Office', shortName: 'Office', icon: 'business_center' },
+  { name: 'Outside food', shortName: 'Ot-Food', icon: 'restaurant' },
+  { name: 'Parties', shortName: 'Parties', icon: 'celebration' },
+  { name: 'Previous month expenses', shortName: 'PME', icon: 'history' },
+  { name: 'Relatives and gifts', shortName: 'Relatvs', icon: 'redeem' },
+  { name: 'Bike', shortName: 'Bike', icon: 'two_wheeler' },
+  { name: 'Naveen', shortName: 'Naani', icon: 'person' },
+  { name: 'Sowji', shortName: 'Sowji', icon: 'face_3' },
+  { name: 'Our expenses', shortName: 'Our-exp', icon: 'favorite' },
+  { name: 'Health', shortName: 'Health', icon: 'medical_services' },
+  { name: 'Our Plans', shortName: 'Our Plan', icon: 'event_upcoming' },
+  { name: 'Exceptional', shortName: 'Excptnal', icon: 'emergency' },
+  { name: 'Helping', shortName: 'Helping', icon: 'volunteer_activism' },
+  { name: 'Other', shortName: '', icon: 'category' },
 ];
+
+const CATEGORY_ICON_MAP = {
+  'bl-home': 'cottage',
+  'bills and rents': 'receipt_long',
+  'credit card expenses': 'credit_card',
+  'friends and meet-ups': 'groups',
+  'kitchen utilities': 'kitchen',
+  'miscellaneous expenses': 'widgets',
+  office: 'business_center',
+  'outside food': 'restaurant',
+  parties: 'celebration',
+  'previous month expenses': 'history',
+  'relatives and gifts': 'redeem',
+  bike: 'two_wheeler',
+  naveen: 'person',
+  sowji: 'face_3',
+  'our expenses': 'favorite',
+  health: 'medical_services',
+  'our plans': 'event_upcoming',
+  exceptional: 'emergency',
+  helping: 'volunteer_activism',
+  other: 'category',
+  // Common variants
+  'food & dining': 'restaurant',
+  food: 'restaurant',
+  transport: 'directions_car',
+  shopping: 'local_mall',
+  utilities: 'bolt',
+  entertainment: 'movie',
+  groceries: 'shopping_basket',
+  rent: 'home',
+  travel: 'flight',
+  education: 'school',
+  investments: 'trending_up',
+  savings: 'savings',
+  personal: 'person',
+};
+
+function getDefaultCategoryIcon(category) {
+  const cat = (category || '').toLowerCase().trim();
+  if (CATEGORY_ICON_MAP[cat]) return CATEGORY_ICON_MAP[cat];
+
+  // Domain keyword fallbacks
+  if (
+    cat.includes('food') ||
+    cat.includes('dining') ||
+    cat.includes('cafe') ||
+    cat.includes('restaurant')
+  )
+    return 'restaurant';
+  if (cat.includes('kitchen') || cat.includes('grocer') || cat.includes('supermarket'))
+    return 'kitchen';
+  if (
+    cat.includes('transport') ||
+    cat.includes('travel') ||
+    cat.includes('cab') ||
+    cat.includes('car') ||
+    cat.includes('fuel')
+  )
+    return 'directions_car';
+  if (cat.includes('bike') || cat.includes('scooter') || cat.includes('two wheeler'))
+    return 'two_wheeler';
+  if (
+    cat.includes('shop') ||
+    cat.includes('mall') ||
+    cat.includes('amazon') ||
+    cat.includes('clothes')
+  )
+    return 'local_mall';
+  if (
+    cat.includes('bill') ||
+    cat.includes('rent') ||
+    cat.includes('recharge') ||
+    cat.includes('electric') ||
+    cat.includes('wifi')
+  )
+    return 'receipt_long';
+  if (cat.includes('card') || cat.includes('credit')) return 'credit_card';
+  if (cat.includes('friend') || cat.includes('meet')) return 'groups';
+  if (cat.includes('relative') || cat.includes('gift')) return 'redeem';
+  if (cat.includes('party') || cat.includes('club') || cat.includes('celebrat'))
+    return 'celebration';
+  if (
+    cat.includes('entertain') ||
+    cat.includes('movie') ||
+    cat.includes('cinema') ||
+    cat.includes('gaming')
+  )
+    return 'movie';
+  if (cat.includes('health') || cat.includes('med') || cat.includes('doc') || cat.includes('gym'))
+    return 'medical_services';
+  if (cat.includes('home') || cat.includes('house')) return 'cottage';
+  if (cat.includes('work') || cat.includes('office') || cat.includes('desk'))
+    return 'business_center';
+  if (cat.includes('invest') || cat.includes('stock') || cat.includes('gold')) return 'trending_up';
+  if (cat.includes('plan')) return 'event_upcoming';
+  if (cat.includes('help') || cat.includes('charity')) return 'volunteer_activism';
+  if (cat.includes('except') || cat.includes('urg') || cat.includes('emerg')) return 'emergency';
+  if (cat.includes('prev') || cat.includes('history')) return 'history';
+  if (cat.includes('misc')) return 'widgets';
+  if (cat.includes('edu') || cat.includes('course') || cat.includes('book')) return 'school';
+  return 'category';
+}
 
 /**
  * Get user's category list synchronized with MongoDB.
@@ -126,44 +248,154 @@ exports.getCategories = async (req, res, next) => {
       return res.status(404).json({ status: 'error', message: 'User not found' });
     }
 
-    let categories = user.expenseCategories;
+    let categories = user.expenseCategories || [];
 
-    // Only seed with initial defaults if expenseCategories is never set (null / undefined)
-    if (categories === undefined || categories === null) {
-      const [expenseCats, pendingCats] = await Promise.all([
-        Expense.distinct('category', { user: req.user.id }),
-        PendingTransaction.distinct('category', { user: req.user.id }),
-      ]);
+    // Ensure all standard DEFAULT_CATEGORIES are present in user categories so all available categories always show
+    const seen = new Set();
+    const mergedCategories = [];
+    categories.forEach((c) => {
+      if (c && c.name && typeof c.name === 'string') {
+        seen.add(c.name.trim().toLowerCase());
+        mergedCategories.push(c);
+      }
+    });
 
-      const seen = new Set();
-      const initial = [];
+    let hasModified = false;
+    DEFAULT_CATEGORIES.forEach((def) => {
+      if (!seen.has(def.name.trim().toLowerCase())) {
+        seen.add(def.name.trim().toLowerCase());
+        mergedCategories.push({
+          name: def.name,
+          shortName: def.shortName || '',
+          icon: def.icon || getDefaultCategoryIcon(def.name),
+        });
+        hasModified = true;
+      }
+    });
 
-      // 1. Add defaults
-      DEFAULT_CATEGORIES.forEach((name) => {
-        seen.add(name.toLowerCase());
-        initial.push({ name, shortName: '' });
-      });
+    categories = mergedCategories;
 
-      // 2. Discover any custom categories from actual user expenses
-      [...expenseCats, ...pendingCats].forEach((cat) => {
-        if (cat && typeof cat === 'string' && cat.trim().length > 0) {
-          const trimmed = cat.trim();
-          if (!seen.has(trimmed.toLowerCase())) {
-            seen.add(trimmed.toLowerCase());
-            initial.push({ name: trimmed, shortName: '' });
-          }
+    // Discover any custom categories from actual user expenses
+    const [expenseCats, pendingCats] = await Promise.all([
+      Expense.distinct('category', { user: req.user.id }),
+      PendingTransaction.distinct('category', { user: req.user.id }),
+    ]);
+
+    [...expenseCats, ...pendingCats].forEach((cat) => {
+      if (cat && typeof cat === 'string' && cat.trim().length > 0) {
+        const trimmed = cat.trim();
+        if (!seen.has(trimmed.toLowerCase())) {
+          seen.add(trimmed.toLowerCase());
+          categories.push({ name: trimmed, shortName: '', icon: getDefaultCategoryIcon(trimmed) });
+          hasModified = true;
         }
-      });
+      }
+    });
 
-      categories = initial;
+    // Compute 30-day and lifetime category usage statistics for sorting
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const userObjectId = new mongoose.Types.ObjectId(req.user.id);
+    const usageStats = await Expense.aggregate([
+      { $match: { user: userObjectId } },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$category' } } },
+          totalCount: { $sum: 1 },
+          recentCount30d: {
+            $sum: { $cond: [{ $gte: ['$date', thirtyDaysAgo] }, 1, 0] },
+          },
+          lastUsed: { $max: '$date' },
+        },
+      },
+    ]);
 
-      // Persist initial array to database so subsequent updates/deletes are permanently preserved
-      await User.findByIdAndUpdate(req.user.id, { $set: { expenseCategories: initial } });
+    const statsMap = new Map();
+    (usageStats || []).forEach((s) => {
+      if (s && s._id) {
+        statsMap.set(s._id, {
+          recentCount30d: s.recentCount30d || 0,
+          totalCount: s.totalCount || 0,
+          lastUsed: s.lastUsed ? new Date(s.lastUsed).getTime() : 0,
+        });
+      }
+    });
+
+    // Ensure all categories have an icon and 'Other' is always present
+    let hasMissingIcon = false;
+    const mapped = (categories || []).map((c) => {
+      const icon =
+        c.icon && c.icon.trim().length > 0 ? c.icon.trim() : getDefaultCategoryIcon(c.name);
+      if (!c.icon || c.icon !== icon) hasMissingIcon = true;
+      const key = (c.name || '').trim().toLowerCase();
+      const stat = statsMap.get(key) || { recentCount30d: 0, totalCount: 0, lastUsed: 0 };
+      return {
+        name: c.name,
+        shortName: c.shortName || '',
+        icon,
+        recentCount30d: stat.recentCount30d,
+        totalUsageCount: stat.totalCount,
+        lastUsed: stat.lastUsed ? new Date(stat.lastUsed).toISOString() : null,
+      };
+    });
+
+    // Auto-persist updated categories & icons to user record if any were added or missing
+    if ((hasModified || hasMissingIcon) && mapped.length > 0) {
+      const toPersist = mapped.map((c) => ({
+        name: c.name,
+        shortName: c.shortName || '',
+        icon: c.icon,
+      }));
+      await User.findByIdAndUpdate(req.user.id, { $set: { expenseCategories: toPersist } });
     }
 
-    // Ensure 'Other' is always present and placed at the very end
-    const filtered = (categories || []).filter((c) => c && c.name && c.name.toLowerCase() !== 'other');
-    const otherCat = (categories || []).find((c) => c && c.name && c.name.toLowerCase() === 'other') || { name: 'Other', shortName: '' };
+    const filtered = mapped.filter((c) => c && c.name && c.name.toLowerCase() !== 'other');
+    const otherCat = mapped.find((c) => c && c.name && c.name.toLowerCase() === 'other') || {
+      name: 'Other',
+      shortName: '',
+      icon: 'category',
+      recentCount30d: 0,
+      totalUsageCount: 0,
+      lastUsed: null,
+    };
+
+    // Sort categories: Heavily used in the last 30 days come first!
+    filtered.sort((a, b) => {
+      // 1. Primary: 30-day usage count (descending)
+      const countA = a.recentCount30d || 0;
+      const countB = b.recentCount30d || 0;
+      if (countA !== countB) {
+        return countB - countA;
+      }
+
+      // 2. Recency tie-breaker for active 30-day categories
+      if (countA > 0) {
+        const timeA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+        const timeB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+        if (timeA !== timeB) {
+          return timeB - timeA;
+        }
+      }
+
+      // 3. Fallback: all-time total usage count (descending)
+      const totalA = a.totalUsageCount || 0;
+      const totalB = b.totalUsageCount || 0;
+      if (totalA !== totalB) {
+        return totalB - totalA;
+      }
+
+      // 4. Lifetime recency tie-breaker
+      if (totalA > 0) {
+        const timeA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+        const timeB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+        if (timeA !== timeB) {
+          return timeB - timeA;
+        }
+      }
+
+      // 5. Alphabetical order for unused categories
+      return a.name.localeCompare(b.name);
+    });
+
     const result = [...filtered, otherCat];
 
     res.status(200).json({
@@ -190,18 +422,24 @@ exports.updateCategories = async (req, res, next) => {
       .map((c) => ({
         name: c.name.trim(),
         shortName: typeof c.shortName === 'string' ? c.shortName.trim() : '',
+        icon:
+          typeof c.icon === 'string' && c.icon.trim().length > 0
+            ? c.icon.trim()
+            : getDefaultCategoryIcon(c.name),
       }));
 
     const hasOther = sanitized.some((c) => c.name.toLowerCase() === 'other');
     if (!hasOther) {
-      sanitized.push({ name: 'Other', shortName: '' });
+      sanitized.push({ name: 'Other', shortName: 'OTHR', icon: 'category' });
     }
 
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { $set: { expenseCategories: sanitized } },
       { new: true, runValidators: true }
-    ).select('expenseCategories').lean();
+    )
+      .select('expenseCategories')
+      .lean();
 
     res.status(200).json({
       status: 'success',
@@ -228,16 +466,23 @@ exports.reassignCategory = async (req, res, next) => {
     const to = typeof req.body.to === 'string' ? req.body.to.trim() : '';
 
     if (!from || !to) {
-      return res.status(400).json({ status: 'error', message: 'Both "from" and "to" categories are required.' });
+      return res
+        .status(400)
+        .json({ status: 'error', message: 'Both "from" and "to" categories are required.' });
     }
 
     if (from === to) {
-      return res.status(200).json({ status: 'success', data: { expensesUpdated: 0, pendingUpdated: 0 } });
+      return res
+        .status(200)
+        .json({ status: 'success', data: { expensesUpdated: 0, pendingUpdated: 0 } });
     }
 
     const [expenses, pending] = await Promise.all([
       Expense.updateMany({ user: req.user.id, category: from }, { $set: { category: to } }),
-      PendingTransaction.updateMany({ user: req.user.id, category: from }, { $set: { category: to } }),
+      PendingTransaction.updateMany(
+        { user: req.user.id, category: from },
+        { $set: { category: to } }
+      ),
     ]);
 
     res.status(200).json({
@@ -268,7 +513,7 @@ exports.updateExpense = async (req, res, next) => {
     const expense = await Expense.findOneAndUpdate(
       { _id: req.params.id, user: req.user.id },
       { $set: updates },
-      { new: true, runValidators: true },
+      { new: true, runValidators: true }
     );
 
     if (!expense) {
@@ -291,14 +536,15 @@ exports.deleteExpense = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-};exports.getExpenseSummary = async (req, res, next) => {
+};
+exports.getExpenseSummary = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const now = new Date();
-    
+
     // Convert current UTC time to IST offset (UTC+5:30) for accurate boundary checks
-    const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
-    const istNow = new Date(utcTime + (3600000 * 5.5));
+    const utcTime = now.getTime() + now.getTimezoneOffset() * 60000;
+    const istNow = new Date(utcTime + 3600000 * 5.5);
     const currentYear = istNow.getFullYear();
     const currentMonth = istNow.getMonth(); // 0-indexed
 
@@ -324,8 +570,10 @@ exports.deleteExpense = async (req, res, next) => {
     const monthNumStr = String(month + 1).padStart(2, '0');
     const startOfMonth = new Date(`${year}-${monthNumStr}-01T00:00:00.000+05:30`);
     const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const endOfMonth = new Date(`${year}-${monthNumStr}-${String(daysInMonth).padStart(2, '0')}T23:59:59.999+05:30`);
-    
+    const endOfMonth = new Date(
+      `${year}-${monthNumStr}-${String(daysInMonth).padStart(2, '0')}T23:59:59.999+05:30`
+    );
+
     let daysPassed = daysInMonth;
     let daysLeft = 0;
     let dayOfMonth = daysInMonth;
@@ -347,17 +595,19 @@ exports.deleteExpense = async (req, res, next) => {
     const prevMonthNumStr = String(prevMonth + 1).padStart(2, '0');
 
     const startOfPrevMonth = new Date(`${prevYear}-${prevMonthNumStr}-01T00:00:00.000+05:30`);
-    const endOfPrevMonth = new Date(`${prevYear}-${prevMonthNumStr}-${String(prevDaysInMonth).padStart(2, '0')}T23:59:59.999+05:30`);
+    const endOfPrevMonth = new Date(
+      `${prevYear}-${prevMonthNumStr}-${String(prevDaysInMonth).padStart(2, '0')}T23:59:59.999+05:30`
+    );
 
     // ── 3. Fetch ONLY relevant expenses using MongoDB queries ──
     const thisMonthExpenses = await Expense.find({
       user: userId,
-      date: { $gte: startOfMonth, $lte: endOfMonth }
+      date: { $gte: startOfMonth, $lte: endOfMonth },
     });
 
     const prevMonthExpenses = await Expense.find({
       user: userId,
-      date: { $gte: startOfPrevMonth, $lte: endOfPrevMonth }
+      date: { $gte: startOfPrevMonth, $lte: endOfPrevMonth },
     });
 
     // ── 4. Calculate monthly spend precisely ──
@@ -374,15 +624,16 @@ exports.deleteExpense = async (req, res, next) => {
 
     // ── 6. Top Categories (from this month only) ──
     const categoryTotals = {};
-    thisMonthExpenses.forEach(e => {
+    thisMonthExpenses.forEach((e) => {
       categoryTotals[e.category] = (categoryTotals[e.category] || 0) + e.amount;
     });
-    
+
     const topCategories = Object.keys(categoryTotals)
-      .map(cat => ({
+      .map((cat) => ({
         name: cat,
         amount: categoryTotals[cat],
-        percentage: monthlySpend === 0 ? 0 : Math.round((categoryTotals[cat] / monthlySpend) * 1000) / 10
+        percentage:
+          monthlySpend === 0 ? 0 : Math.round((categoryTotals[cat] / monthlySpend) * 1000) / 10,
       }))
       .sort((a, b) => b.amount - a.amount)
       .slice(0, 5);
@@ -406,7 +657,7 @@ exports.deleteExpense = async (req, res, next) => {
 
       const weekExpenses = await Expense.find({
         user: userId,
-        date: { $gte: startOfChartRange, $lte: endOfChartRange }
+        date: { $gte: startOfChartRange, $lte: endOfChartRange },
       });
 
       for (let offset = -6; offset <= 0; offset++) {
@@ -415,7 +666,7 @@ exports.deleteExpense = async (req, res, next) => {
         const dEnd = new Date(istMidnight(istShadow(offset + 1)).getTime() - 1);
 
         const dayTotal = weekExpenses
-          .filter(e => e.date >= dStart && e.date <= dEnd)
+          .filter((e) => e.date >= dStart && e.date <= dEnd)
           .reduce((sum, e) => sum + e.amount, 0);
 
         const label = shadow.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
@@ -436,14 +687,22 @@ exports.deleteExpense = async (req, res, next) => {
       }
     } else {
       // Past or other month: 7 evenly spaced sample days / weeks across the month
-      const sampleDays = [1, Math.min(5, daysInMonth), Math.min(10, daysInMonth), Math.min(15, daysInMonth), Math.min(20, daysInMonth), Math.min(25, daysInMonth), daysInMonth];
+      const sampleDays = [
+        1,
+        Math.min(5, daysInMonth),
+        Math.min(10, daysInMonth),
+        Math.min(15, daysInMonth),
+        Math.min(20, daysInMonth),
+        Math.min(25, daysInMonth),
+        daysInMonth,
+      ];
       for (const d of sampleDays) {
         const shadow = new Date(Date.UTC(year, month, d));
         const dStart = istMidnight(shadow);
         const dEnd = new Date(istMidnight(new Date(Date.UTC(year, month, d + 1))).getTime() - 1);
 
         const dayTotal = thisMonthExpenses
-          .filter(e => e.date >= dStart && e.date <= dEnd)
+          .filter((e) => e.date >= dStart && e.date <= dEnd)
           .reduce((sum, e) => sum + e.amount, 0);
 
         const label = `D${d}`;
@@ -470,7 +729,7 @@ exports.deleteExpense = async (req, res, next) => {
 
       monthDaily.push(
         thisMonthExpenses
-          .filter(e => e.date >= dayStart && e.date <= dayEnd)
+          .filter((e) => e.date >= dayStart && e.date <= dayEnd)
           .reduce((sum, e) => sum + e.amount, 0)
       );
     }
@@ -478,7 +737,7 @@ exports.deleteExpense = async (req, res, next) => {
     // ── 8. Trend calculation ──
     const prevDailyAvg = prevMonthSpend / prevDaysInMonth;
     const currentDailyAvg = daysPassed > 0 ? monthlySpend / daysPassed : 0;
-    
+
     let trendPct = 0;
     let trendStatus = 'flat';
     if (prevDailyAvg > 0 && currentDailyAvg > 0) {
@@ -495,24 +754,26 @@ exports.deleteExpense = async (req, res, next) => {
     if (isPastMonth) {
       estimatedSpend = monthlySpend;
       const isOver = monthlySpend > budgetTarget;
-      statusText = isOver 
+      statusText = isOver
         ? `Closed at ₹${monthlySpend.toLocaleString('en-IN')} (₹${(monthlySpend - budgetTarget).toLocaleString('en-IN')} over budget).`
         : `Closed at ₹${monthlySpend.toLocaleString('en-IN')} (₹${(budgetTarget - monthlySpend).toLocaleString('en-IN')} saved).`;
       statusColor = isOver ? 'var(--lm-color-error)' : 'var(--lm-color-success)';
     } else if (isCurrentMonth) {
       estimatedSpend = Math.round(currentDailyAvg * daysInMonth);
       const isHealthy = estimatedSpend <= budgetTarget;
-      statusText = isHealthy ? "You're on track to stay within budget." : "You're projected to exceed your budget.";
+      statusText = isHealthy
+        ? "You're on track to stay within budget."
+        : "You're projected to exceed your budget.";
       statusColor = isHealthy ? 'var(--lm-color-success)' : 'var(--lm-color-error)';
     } else {
       estimatedSpend = 0;
       statusText = 'Upcoming month';
       statusColor = 'var(--lm-color-text-secondary)';
     }
-    
+
     // ── 10. Insight ──
     const prevCategoryTotals = {};
-    prevMonthExpenses.forEach(e => {
+    prevMonthExpenses.forEach((e) => {
       const catName = e.category || 'Other';
       prevCategoryTotals[catName] = (prevCategoryTotals[catName] || 0) + e.amount;
     });
@@ -520,7 +781,7 @@ exports.deleteExpense = async (req, res, next) => {
     const topCat = topCategories[0]?.name || 'Other';
     const topCatThisMonth = categoryTotals[topCat] || 0;
     const topCatPrevMonth = prevCategoryTotals[topCat] || 0;
-    
+
     let insightPct = 0;
     let insightText = '';
     if (topCatPrevMonth > 0) {
@@ -568,20 +829,20 @@ exports.deleteExpense = async (req, res, next) => {
           weekEnd: endOfMonth.toISOString(),
           avgPerWeek: Math.round(weeklyTotal),
           trendPct,
-          trendStatus
+          trendStatus,
         },
         monthDaily,
         forecast: {
           estimatedSpend,
           statusText,
-          statusColor
+          statusColor,
         },
         insight: {
           highlightPct: `${Math.abs(insightPct)}%`,
           highlightCategory: topCat,
-          text: insightText
-        }
-      }
+          text: insightText,
+        },
+      },
     });
   } catch (error) {
     next(error);
@@ -590,11 +851,13 @@ exports.deleteExpense = async (req, res, next) => {
 
 exports.getPendingTransactions = async (req, res, next) => {
   try {
-    const pending = await PendingTransaction.find({ user: req.user.id, status: 'Pending' }).sort({ date: -1 });
+    const pending = await PendingTransaction.find({ user: req.user.id, status: 'Pending' }).sort({
+      date: -1,
+    });
     res.status(200).json({
       status: 'success',
       count: pending.length,
-      data: pending
+      data: pending,
     });
   } catch (error) {
     next(error);
@@ -625,7 +888,7 @@ exports.processPendingTransaction = async (req, res, next) => {
     const pending = await PendingTransaction.findOneAndUpdate(
       { _id: id, user: req.user.id, status: 'Pending' },
       { $set: { status: nextStatus } },
-      { new: true },
+      { new: true }
     );
 
     if (!pending) {
@@ -633,7 +896,9 @@ exports.processPendingTransaction = async (req, res, next) => {
       // the two so a double tap does not look like a missing record.
       const exists = await PendingTransaction.exists({ _id: id, user: req.user.id });
       return exists
-        ? res.status(409).json({ status: 'error', message: 'This transaction has already been reviewed.' })
+        ? res
+            .status(409)
+            .json({ status: 'error', message: 'This transaction has already been reviewed.' })
         : res.status(404).json({ status: 'error', message: 'Pending transaction not found' });
     }
 
@@ -644,7 +909,12 @@ exports.processPendingTransaction = async (req, res, next) => {
     try {
       const expense = await Expense.create({
         user: req.user.id,
-        title: expenseData.title || expenseData.merchant || pending.title || pending.merchant || 'Expense',
+        title:
+          expenseData.title ||
+          expenseData.merchant ||
+          pending.title ||
+          pending.merchant ||
+          'Expense',
         amount: expenseData.amount ?? pending.amount,
         merchant: expenseData.merchant || pending.merchant,
         category: expenseData.category || pending.category,
@@ -663,7 +933,10 @@ exports.processPendingTransaction = async (req, res, next) => {
       // got as far as creating it. The row is genuinely approved, so leave the
       // status alone and return what is already recorded.
       if (createErr?.code === 11000 && pending.gmailMessageId) {
-        const existing = await Expense.findOne({ user: req.user.id, gmailMessageId: pending.gmailMessageId });
+        const existing = await Expense.findOne({
+          user: req.user.id,
+          gmailMessageId: pending.gmailMessageId,
+        });
         if (existing) return res.status(200).json({ status: 'success', data: existing });
       }
 
@@ -673,9 +946,12 @@ exports.processPendingTransaction = async (req, res, next) => {
       // simply lose the record. Put it back so it can be reviewed again.
       await PendingTransaction.findOneAndUpdate(
         { _id: id, user: req.user.id, status: 'Approved' },
-        { $set: { status: 'Pending' } },
+        { $set: { status: 'Pending' } }
       );
-      console.error(`[Expenses] Approval failed for pending ${id}; restored to Pending:`, createErr.message);
+      console.error(
+        `[Expenses] Approval failed for pending ${id}; restored to Pending:`,
+        createErr.message
+      );
       throw createErr;
     }
   } catch (error) {
@@ -691,7 +967,7 @@ exports.simulateAutoLog = async (req, res, next) => {
     }
 
     const { title, amount, merchant, paymentMethod, date } = req.body;
-    
+
     // Simulate parsing email to a pending transaction
     const pending = await PendingTransaction.create({
       user: req.user.id,
@@ -700,12 +976,12 @@ exports.simulateAutoLog = async (req, res, next) => {
       merchant: merchant || 'Simulated Merchant',
       paymentMethod: paymentMethod || 'UPI',
       date: date || new Date(),
-      status: 'Pending'
+      status: 'Pending',
     });
 
     res.status(201).json({
       status: 'success',
-      data: pending
+      data: pending,
     });
   } catch (error) {
     next(error);
@@ -731,13 +1007,20 @@ exports.syncExpenses = async (req, res, next) => {
       return res.status(404).json({ status: 'error', message: 'User not found' });
     }
 
-    console.log(`[SyncExpenses] User: ${user.email}, gmailConnected: ${user.gmailConnected}, hasRefreshToken: ${!!user.googleRefreshToken}`);
+    console.log(
+      `[SyncExpenses] User: ${user.email}, gmailConnected: ${user.gmailConnected}, hasRefreshToken: ${!!user.googleRefreshToken}`
+    );
 
     if (!user.gmailConnected || !user.googleRefreshToken) {
       // Self-heal a half-connected account: flagged as connected but no token to use.
       if (user.gmailConnected && !user.googleRefreshToken) {
-        await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
-        console.warn(`[SyncExpenses] ${user.email} was flagged connected with no refresh token — reset to disconnected.`);
+        await User.findByIdAndUpdate(user._id, {
+          gmailConnected: false,
+          expenseAutomationEnabled: false,
+        });
+        console.warn(
+          `[SyncExpenses] ${user.email} was flagged connected with no refresh token — reset to disconnected.`
+        );
       }
 
       return res.status(200).json({
@@ -748,7 +1031,11 @@ exports.syncExpenses = async (req, res, next) => {
     }
 
     const engine = require('../automation/engine');
-    const { recordGmailError, recordGmailSyncSuccess, failureFromStats } = require('../utils/gmail-state.util');
+    const {
+      recordGmailError,
+      recordGmailSyncSuccess,
+      failureFromStats,
+    } = require('../utils/gmail-state.util');
 
     // A person pressing Refresh is asking "are you sure you have everything?",
     // not "check for anything since your watermark". Run the full window — it is
@@ -767,10 +1054,17 @@ exports.syncExpenses = async (req, res, next) => {
       if (failure.fatal) {
         const { invalidateOAuth2Client } = require('../automation/gmail/gmail-monitor');
         invalidateOAuth2Client(user._id);
-        await User.findByIdAndUpdate(user._id, { gmailConnected: false, expenseAutomationEnabled: false });
-        console.warn(`[SyncExpenses] Google credentials rejected for ${user.email} (${failure.code}). Marked disconnected.`);
+        await User.findByIdAndUpdate(user._id, {
+          gmailConnected: false,
+          expenseAutomationEnabled: false,
+        });
+        console.warn(
+          `[SyncExpenses] Google credentials rejected for ${user.email} (${failure.code}). Marked disconnected.`
+        );
       } else {
-        console.error(`[SyncExpenses] Sync failed for ${user.email} (${failure.code}): ${failure.message}`);
+        console.error(
+          `[SyncExpenses] Sync failed for ${user.email} (${failure.code}): ${failure.message}`
+        );
       }
 
       return res.status(200).json({
@@ -795,11 +1089,12 @@ exports.syncExpenses = async (req, res, next) => {
     // "nothing new" off `processed` alone would therefore report a mailbox full of
     // already-recorded alerts as an empty one.
     const seen = stats.processed + (stats.skipped?.alreadySynced || 0);
-    const message = stats.created > 0
-      ? `Added ${stats.created} transaction${stats.created === 1 ? '' : 's'} for review.`
-      : seen > 0
-        ? 'No new transactions — everything found was already recorded.'
-        : 'No bank emails found in the sync window.';
+    const message =
+      stats.created > 0
+        ? `Added ${stats.created} transaction${stats.created === 1 ? '' : 's'} for review.`
+        : seen > 0
+          ? 'No new transactions — everything found was already recorded.'
+          : 'No bank emails found in the sync window.';
 
     return res.status(200).json({ status: 'success', message, data: stats });
   } catch (error) {
@@ -817,7 +1112,7 @@ exports.getAutomationStatus = async (req, res, next) => {
   try {
     const User = require('../models/User');
     const { getSupportedBanks } = require('../automation/parsers/parser-registry');
-    
+
     const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'User not found' });
@@ -829,8 +1124,8 @@ exports.getAutomationStatus = async (req, res, next) => {
         gmailConnected: user.gmailConnected,
         expenseAutomationEnabled: user.expenseAutomationEnabled,
         enabledBanks: user.expenseAutomationBanks || [],
-        supportedBanks: getSupportedBanks()
-      }
+        supportedBanks: getSupportedBanks(),
+      },
     });
   } catch (error) {
     next(error);
@@ -846,7 +1141,7 @@ exports.updateAutomationSettings = async (req, res, next) => {
   try {
     const { expenseAutomationEnabled, enabledBanks } = req.body;
     const User = require('../models/User');
-    
+
     const updateData = {};
     if (typeof expenseAutomationEnabled === 'boolean') {
       updateData.expenseAutomationEnabled = expenseAutomationEnabled;
@@ -867,9 +1162,13 @@ exports.updateAutomationSettings = async (req, res, next) => {
       try {
         const { ensureWatch } = require('../automation/gmail/gmail-watch-manager');
         const registered = await ensureWatch(user);
-        if (registered) console.log(`[Gmail Setup] Registered push notifications for ${user.email}`);
+        if (registered)
+          console.log(`[Gmail Setup] Registered push notifications for ${user.email}`);
       } catch (watchErr) {
-        console.error(`[Gmail Setup] Failed to re-activate push notifications for ${user.email}:`, watchErr.message);
+        console.error(
+          `[Gmail Setup] Failed to re-activate push notifications for ${user.email}:`,
+          watchErr.message
+        );
       }
     }
 
@@ -879,8 +1178,8 @@ exports.updateAutomationSettings = async (req, res, next) => {
       data: {
         gmailConnected: user.gmailConnected,
         expenseAutomationEnabled: user.expenseAutomationEnabled,
-        enabledBanks: user.expenseAutomationBanks
-      }
+        enabledBanks: user.expenseAutomationBanks,
+      },
     });
   } catch (error) {
     next(error);
@@ -927,7 +1226,10 @@ exports.disconnectGmail = async (req, res, next) => {
         console.log(`[Gmail Disconnect] Revoked Google OAuth token for user ${user.email}`);
       } catch (revokeErr) {
         // Log but don't fail, we want to clear local credentials anyway
-        console.warn(`[Gmail Disconnect] Warning: Google OAuth token revoke failed:`, revokeErr.message);
+        console.warn(
+          `[Gmail Disconnect] Warning: Google OAuth token revoke failed:`,
+          revokeErr.message
+        );
       }
     }
 
@@ -953,7 +1255,7 @@ exports.disconnectGmail = async (req, res, next) => {
 
     res.status(200).json({
       status: 'success',
-      message: 'Gmail disconnected successfully'
+      message: 'Gmail disconnected successfully',
     });
   } catch (error) {
     next(error);
@@ -975,15 +1277,18 @@ exports.mergeExpenses = async (req, res, next) => {
     if (!primaryId || !Array.isArray(mergeIds) || mergeIds.length === 0) {
       return res.status(400).json({
         status: 'error',
-        message: 'Please provide a primary transaction ID and at least one secondary transaction to merge.'
+        message:
+          'Please provide a primary transaction ID and at least one secondary transaction to merge.',
       });
     }
 
-    const cleanMergeIds = [...new Set(mergeIds.filter(id => id && String(id) !== String(primaryId)))];
+    const cleanMergeIds = [
+      ...new Set(mergeIds.filter((id) => id && String(id) !== String(primaryId))),
+    ];
     if (cleanMergeIds.length === 0) {
       return res.status(400).json({
         status: 'error',
-        message: 'Cannot merge a transaction into itself.'
+        message: 'Cannot merge a transaction into itself.',
       });
     }
 
@@ -991,39 +1296,45 @@ exports.mergeExpenses = async (req, res, next) => {
     if (!primaryExpense) {
       return res.status(404).json({
         status: 'error',
-        message: 'Primary expense not found.'
+        message: 'Primary expense not found.',
       });
     }
 
     const secondaryExpenses = await Expense.find({
       _id: { $in: cleanMergeIds },
-      user: req.user.id
+      user: req.user.id,
     });
 
     if (secondaryExpenses.length === 0) {
       return res.status(404).json({
         status: 'error',
-        message: 'No matching secondary expenses found to merge.'
+        message: 'No matching secondary expenses found to merge.',
       });
     }
 
     // Calculate sum of amounts
-    const additionalAmount = secondaryExpenses.reduce((sum, exp) => sum + (Number(exp.amount) || 0), 0);
-    const newTotalAmount = Math.round((Number(primaryExpense.amount) + additionalAmount) * 100) / 100;
+    const additionalAmount = secondaryExpenses.reduce(
+      (sum, exp) => sum + (Number(exp.amount) || 0),
+      0
+    );
+    const newTotalAmount =
+      Math.round((Number(primaryExpense.amount) + additionalAmount) * 100) / 100;
 
     // Combine tags uniquely
     const allTags = new Set(primaryExpense.tags || []);
-    secondaryExpenses.forEach(exp => {
-      (exp.tags || []).forEach(t => allTags.add(t));
+    secondaryExpenses.forEach((exp) => {
+      (exp.tags || []).forEach((t) => allTags.add(t));
     });
 
     // Combine notes
     let combinedNotes = (primaryExpense.notes || '').trim();
     const secondaryNotes = secondaryExpenses
-      .map(exp => {
+      .map((exp) => {
         const title = exp.title || exp.merchant || 'Expense';
         const notes = (exp.notes || '').trim();
-        return notes ? `[Merged ${title} (₹${exp.amount})]: ${notes}` : `[Merged ${title} (₹${exp.amount})]`;
+        return notes
+          ? `[Merged ${title} (₹${exp.amount})]: ${notes}`
+          : `[Merged ${title} (₹${exp.amount})]`;
       })
       .join('; ');
 
@@ -1040,14 +1351,14 @@ exports.mergeExpenses = async (req, res, next) => {
     await primaryExpense.save();
 
     // Delete secondary expenses
-    const deletedIds = secondaryExpenses.map(s => s._id);
+    const deletedIds = secondaryExpenses.map((s) => s._id);
     await Expense.deleteMany({ _id: { $in: deletedIds }, user: req.user.id });
 
     return res.status(200).json({
       status: 'success',
       message: `Successfully merged ${secondaryExpenses.length} transaction(s) into primary transaction.`,
       data: primaryExpense,
-      mergedCount: secondaryExpenses.length
+      mergedCount: secondaryExpenses.length,
     });
   } catch (error) {
     next(error);
@@ -1067,60 +1378,66 @@ exports.mergePendingTransactions = async (req, res, next) => {
     if (!primaryId || !Array.isArray(mergeIds) || mergeIds.length === 0) {
       return res.status(400).json({
         status: 'error',
-        message: 'Please provide a primary transaction ID and at least one secondary transaction to merge.'
+        message:
+          'Please provide a primary transaction ID and at least one secondary transaction to merge.',
       });
     }
 
-    const cleanMergeIds = [...new Set(mergeIds.filter(id => id && String(id) !== String(primaryId)))];
+    const cleanMergeIds = [
+      ...new Set(mergeIds.filter((id) => id && String(id) !== String(primaryId))),
+    ];
     if (cleanMergeIds.length === 0) {
       return res.status(400).json({
         status: 'error',
-        message: 'Cannot merge a transaction into itself.'
+        message: 'Cannot merge a transaction into itself.',
       });
     }
 
     const primaryPending = await PendingTransaction.findOne({
       _id: primaryId,
       user: req.user.id,
-      status: 'Pending'
+      status: 'Pending',
     });
 
     if (!primaryPending) {
       return res.status(404).json({
         status: 'error',
-        message: 'Primary pending transaction not found or already processed.'
+        message: 'Primary pending transaction not found or already processed.',
       });
     }
 
     const secondaryPending = await PendingTransaction.find({
       _id: { $in: cleanMergeIds },
       user: req.user.id,
-      status: 'Pending'
+      status: 'Pending',
     });
 
     if (secondaryPending.length === 0) {
       return res.status(404).json({
         status: 'error',
-        message: 'No matching secondary pending transactions found to merge.'
+        message: 'No matching secondary pending transactions found to merge.',
       });
     }
 
     // Sum amounts
     const additionalAmount = secondaryPending.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
-    const newTotalAmount = Math.round((Number(primaryPending.amount) + additionalAmount) * 100) / 100;
+    const newTotalAmount =
+      Math.round((Number(primaryPending.amount) + additionalAmount) * 100) / 100;
 
     // Combine tags and notes
     const allTags = new Set(primaryPending.tags || []);
-    secondaryPending.forEach(p => {
-      (p.tags || []).forEach(t => allTags.add(t));
+    secondaryPending.forEach((p) => {
+      (p.tags || []).forEach((t) => allTags.add(t));
     });
 
     let combinedNotes = (primaryPending.notes || '').trim();
     const secondaryNotes = secondaryPending
-      .map(p => {
+      .map((p) => {
         const title = p.title || p.merchant || 'Pending Transaction';
         const notes = (p.notes || '').trim();
-        return notes ? `[Merged ${title} (₹${p.amount})]: ${notes}` : `[Merged ${title} (₹${p.amount})]`;
+        return notes
+          ? `[Merged ${title} (₹${p.amount})]: ${notes}`
+          : `[Merged ${title} (₹${p.amount})]`;
       })
       .join('; ');
 
@@ -1135,7 +1452,7 @@ exports.mergePendingTransactions = async (req, res, next) => {
     await primaryPending.save();
 
     // Mark secondary pending transactions as Rejected so they are resolved and leave the pending review queue
-    const secondaryIds = secondaryPending.map(s => s._id);
+    const secondaryIds = secondaryPending.map((s) => s._id);
     await PendingTransaction.updateMany(
       { _id: { $in: secondaryIds }, user: req.user.id },
       { $set: { status: 'Rejected' } }
@@ -1145,7 +1462,7 @@ exports.mergePendingTransactions = async (req, res, next) => {
       status: 'success',
       message: `Successfully merged ${secondaryPending.length} pending transaction(s) into primary.`,
       data: primaryPending,
-      mergedCount: secondaryPending.length
+      mergedCount: secondaryPending.length,
     });
   } catch (error) {
     next(error);
