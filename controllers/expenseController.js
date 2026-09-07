@@ -910,11 +910,9 @@ exports.processPendingTransaction = async (req, res, next) => {
       const expense = await Expense.create({
         user: req.user.id,
         title:
-          expenseData.title ||
-          expenseData.merchant ||
-          pending.title ||
-          pending.merchant ||
-          'Expense',
+          expenseData.title !== undefined
+            ? (expenseData.title && expenseData.title.trim()) || ''
+            : (pending.title || pending.merchant || 'Expense'),
         amount: expenseData.amount ?? pending.amount,
         merchant: expenseData.merchant || pending.merchant,
         category: expenseData.category || pending.category,
@@ -971,7 +969,7 @@ exports.simulateAutoLog = async (req, res, next) => {
     // Simulate parsing email to a pending transaction
     const pending = await PendingTransaction.create({
       user: req.user.id,
-      title: title || merchant || 'Simulated Merchant',
+      title: title || '',
       amount: amount || Math.floor(Math.random() * 1000) + 100,
       merchant: merchant || 'Simulated Merchant',
       paymentMethod: paymentMethod || 'UPI',
