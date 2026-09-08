@@ -1,4 +1,5 @@
 const NannaExpense = require('../models/NannaExpense');
+const NannaMonthBudget = require('../models/NannaMonthBudget');
 const AppError = require('../utils/AppError');
 const logger = require('../config/logger');
 
@@ -108,9 +109,67 @@ exports.deleteNannaExpense = async (req, res, next) => {
 
     logger.info('Nanna expense deleted', { userId: req.user.id, expenseId: req.params.id });
 
-    res.status(204).json({ status: 'success', data: null });
+  res.status(204).json({ status: 'success', data: null });
   } catch (err) {
     logger.error('deleteNannaExpense error', { error: err.message, userId: req.user?.id });
+    next(err);
+  }
+};
+
+/**
+ * GET /api/nanna-expenses/budgets
+ * Returns all month budgets set by the authenticated user.
+ * Response: { budgets: [{ year, month, budget }] }
+ */
+exports.getMonthBudgets = async (req, res, next) => {
+  try {
+    const budgets = await NannaMonthBudget.find({ user: req.user.id })
+      .select('year month budget -_id')
+      .lean();
+
+    res.status(200).json({
+      status: 'success',
+      data: { budgets },
+    });
+  } catch (err) {
+    logger.error('getMonthBudgets error', { error: err.message, userId: req.user?.id });
+    next(err);
+  }
+};
+
+/**
+ * PUT /api/nanna-expenses/budgets/:year/:month
+ * Creates or updates the budget for a specific year/month.
+ * Body: { budget: Number }
+ */
+exports.upsertMonthBudget = async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year, 10);
+    const month = parseInt(req.params.month, 10); // 1-indexed
+
+    if (isNaN(year) || isNaN(month) || month < 1 || month > 12) {
+      return next(AppError.badRequest('Invalid year or month.'));
+    }
+
+    const budget = Number(req.body.budget);
+    if (isNaN(budget) || budget < 0) {
+      return next(AppError.badRequest('Budget must be a non-negative number.'));
+    }
+
+    const record = await NannaMonthBudget.findOneAndUpdate(
+      { user: req.user.id, year, month },
+      { budget },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    logger.info('Nanna month budget upserted', { userId: req.user.id, year, month, budget });
+
+    res.status(200).json({
+      status: 'success',
+      data: { budget: { year: record.year, month: record.month, budget: record.budget } },
+    });
+  } catch (err) {
+    logger.error('upsertMonthBudget error', { error: err.message, userId: req.user?.id });
     next(err);
   }
 };

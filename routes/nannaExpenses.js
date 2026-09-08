@@ -6,6 +6,11 @@ const { protect } = require('../middleware/auth');
 // All Nanna expense routes require authentication
 router.use(protect);
 
+// ── Month budget endpoints (must be before /:id to avoid swallowing 'budgets' as an id) ──
+router.get('/budgets', nannaExpenseController.getMonthBudgets);
+router.put('/budgets/:year/:month', nannaExpenseController.upsertMonthBudget);
+
+// ── Expense CRUD ──
 router.route('/')
   .get(nannaExpenseController.getNannaExpenses)
   .post(nannaExpenseController.createNannaExpense);
