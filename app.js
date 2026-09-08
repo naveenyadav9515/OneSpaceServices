@@ -66,6 +66,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/features', require('./routes/features'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/expenses', require('./routes/expenses'));
+app.use('/api/nanna-expenses', require('./routes/nannaExpenses'));
 app.use('/api/webhooks', require('./routes/webhooks'));
 // Fallback Route for Undefined Paths
 app.use((req, res, next) => {
