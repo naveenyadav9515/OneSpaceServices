@@ -292,8 +292,19 @@ exports.getCategories = async (req, res, next) => {
       }
     });
 
-    // Compute 30-day and lifetime category usage statistics for sorting
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    // Compute current month and lifetime category usage statistics for sorting
+    const now = new Date();
+    const utcTime = now.getTime() + now.getTimezoneOffset() * 60000;
+    const istNow = new Date(utcTime + 3600000 * 5.5);
+    const currentYear = istNow.getFullYear();
+    const currentMonth = istNow.getMonth(); // 0-indexed
+    const monthNumStr = String(currentMonth + 1).padStart(2, '0');
+    const startOfCurrentMonth = new Date(`${currentYear}-${monthNumStr}-01T00:00:00.000+05:30`);
+    const daysInCurrentMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+    const endOfCurrentMonth = new Date(
+      `${currentYear}-${monthNumStr}-${String(daysInCurrentMonth).padStart(2, '0')}T23:59:59.999+05:30`
+    );
+
     const userObjectId = new mongoose.Types.ObjectId(req.user.id);
     const usageStats = await Expense.aggregate([
       { $match: { user: userObjectId } },
@@ -301,8 +312,19 @@ exports.getCategories = async (req, res, next) => {
         $group: {
           _id: { $toLower: { $trim: { input: '$category' } } },
           totalCount: { $sum: 1 },
-          recentCount30d: {
-            $sum: { $cond: [{ $gte: ['$date', thirtyDaysAgo] }, 1, 0] },
+          currentMonthCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $gte: ['$date', startOfCurrentMonth] },
+                    { $lte: ['$date', endOfCurrentMonth] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
           },
           lastUsed: { $max: '$date' },
         },
@@ -312,8 +334,10 @@ exports.getCategories = async (req, res, next) => {
     const statsMap = new Map();
     (usageStats || []).forEach((s) => {
       if (s && s._id) {
+        const count = s.currentMonthCount || 0;
         statsMap.set(s._id, {
-          recentCount30d: s.recentCount30d || 0,
+          currentMonthCount: count,
+          recentCount30d: count, // backward-compatibility
           totalCount: s.totalCount || 0,
           lastUsed: s.lastUsed ? new Date(s.lastUsed).getTime() : 0,
         });
@@ -327,12 +351,13 @@ exports.getCategories = async (req, res, next) => {
         c.icon && c.icon.trim().length > 0 ? c.icon.trim() : getDefaultCategoryIcon(c.name);
       if (!c.icon || c.icon !== icon) hasMissingIcon = true;
       const key = (c.name || '').trim().toLowerCase();
-      const stat = statsMap.get(key) || { recentCount30d: 0, totalCount: 0, lastUsed: 0 };
+      const stat = statsMap.get(key) || { currentMonthCount: 0, recentCount30d: 0, totalCount: 0, lastUsed: 0 };
       return {
         name: c.name,
         shortName: c.shortName || '',
         icon,
-        recentCount30d: stat.recentCount30d,
+        currentMonthCount: stat.currentMonthCount,
+        recentCount30d: stat.currentMonthCount,
         totalUsageCount: stat.totalCount,
         lastUsed: stat.lastUsed ? new Date(stat.lastUsed).toISOString() : null,
       };
@@ -353,21 +378,22 @@ exports.getCategories = async (req, res, next) => {
       name: 'Other',
       shortName: '',
       icon: 'category',
+      currentMonthCount: 0,
       recentCount30d: 0,
       totalUsageCount: 0,
       lastUsed: null,
     };
 
-    // Sort categories: Heavily used in the last 30 days come first!
+    // Sort categories: Heavily used in the current month come first!
     filtered.sort((a, b) => {
-      // 1. Primary: 30-day usage count (descending)
-      const countA = a.recentCount30d || 0;
-      const countB = b.recentCount30d || 0;
+      // 1. Primary: Current month usage count (descending)
+      const countA = a.currentMonthCount ?? a.recentCount30d ?? 0;
+      const countB = b.currentMonthCount ?? b.recentCount30d ?? 0;
       if (countA !== countB) {
         return countB - countA;
       }
 
-      // 2. Recency tie-breaker for active 30-day categories
+      // 2. Recency tie-breaker for active current-month categories
       if (countA > 0) {
         const timeA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
         const timeB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
@@ -635,8 +661,7 @@ exports.getExpenseSummary = async (req, res, next) => {
         percentage:
           monthlySpend === 0 ? 0 : Math.round((categoryTotals[cat] / monthlySpend) * 1000) / 10,
       }))
-      .sort((a, b) => b.amount - a.amount)
-      .slice(0, 5);
+      .sort((a, b) => b.amount - a.amount);
 
     // ── 7. Chart Data ──
     const IST_OFFSET_MS = 5.5 * 3600000;
