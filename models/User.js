@@ -105,6 +105,16 @@ const userSchema = new mongoose.Schema(
       ],
       default: undefined,
     },
+    rentalTenants: {
+      type: [
+        {
+          name: { type: String, required: true, trim: true },
+          isActive: { type: Boolean, default: true },
+          createdAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: undefined,
+    },
     gmailWatchExpiry: {
       type: Date,
       default: null,

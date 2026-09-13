@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const TENANTS = ['Mahesh', 'Sai', 'Geetha', 'Prasad', 'Rekha'];
+const DEFAULT_TENANTS = ['Mahesh', 'Sai', 'Geetha', 'Prasad', 'Rekha'];
 
 /**
  * RentalCollection — Tracks rent payments collected from individual tenants.
@@ -16,9 +16,9 @@ const rentalCollectionSchema = new mongoose.Schema(
     },
     tenant: {
       type: String,
-      required: true,
-      enum: TENANTS,
+      required: [true, 'Please provide a tenant name'],
       trim: true,
+      maxlength: [100, 'Tenant name cannot exceed 100 characters'],
     },
     amount: {
       type: Number,
@@ -48,6 +48,7 @@ rentalCollectionSchema.index({ user: 1, date: -1 });
 rentalCollectionSchema.index({ user: 1, tenant: 1, date: -1 });
 
 const RentalCollection = mongoose.model('RentalCollection', rentalCollectionSchema);
-RentalCollection.TENANTS = TENANTS;
+RentalCollection.DEFAULT_TENANTS = DEFAULT_TENANTS;
+RentalCollection.TENANTS = DEFAULT_TENANTS;
 
 module.exports = RentalCollection;

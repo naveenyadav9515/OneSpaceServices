@@ -6,7 +6,12 @@ const { protect } = require('../middleware/auth');
 // All rental collection routes require authentication
 router.use(protect);
 
-router.get('/tenants', rentalCollectionController.getTenants);
+router.route('/tenants')
+  .get(rentalCollectionController.getTenants)
+  .post(rentalCollectionController.addTenant);
+
+router.patch('/tenants/:name/toggle', rentalCollectionController.toggleTenant);
+router.delete('/tenants/:name', rentalCollectionController.deleteTenant);
 
 router.route('/')
   .get(rentalCollectionController.getRentalCollections)
