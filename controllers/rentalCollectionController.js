@@ -40,7 +40,7 @@ exports.createRentalCollection = async (req, res, next) => {
       user: req.user.id,
       tenant: String(tenant).trim(),
       amount: Number(amount),
-      date: date ? new Date(date) : new Date(),
+      date: date && !isNaN(new Date(date).getTime()) ? new Date(date) : new Date(),
       notes: notes ? String(notes).trim() : '',
     });
 
