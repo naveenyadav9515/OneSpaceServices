@@ -216,28 +216,23 @@ exports.deleteTenant = async (req, res, next) => {
       return next(AppError.notFound(`Tenant "${decodedName}" not found.`));
     }
 
-    if (paymentsCount > 0) {
-      user.rentalTenants[tenantIndex].isActive = false;
-      await user.save();
-      return res.status(200).json({
-        status: 'success',
-        message: `Tenant has ${paymentsCount} payment records and was disabled instead of deleted.`,
-        data: {
-          tenant: user.rentalTenants[tenantIndex],
-          tenants: user.rentalTenants,
-          activeTenants: user.rentalTenants.filter(t => t.isActive).map(t => t.name),
-        },
+    if (req.query.deletePayments === 'true') {
+      await RentalCollection.deleteMany({
+        user: req.user.id,
+        tenant: decodedName,
       });
     }
 
     user.rentalTenants.splice(tenantIndex, 1);
     await user.save();
 
-    logger.info('Tenant deleted', { userId: req.user.id, tenant: decodedName });
+    logger.info('Tenant deleted', { userId: req.user.id, tenant: decodedName, paymentsCount });
 
     res.status(200).json({
       status: 'success',
+      message: `Tenant "${decodedName}" removed.`,
       data: {
+        deletedTenant: decodedName,
         tenants: user.rentalTenants,
         activeTenants: user.rentalTenants.filter(t => t.isActive).map(t => t.name),
       },
