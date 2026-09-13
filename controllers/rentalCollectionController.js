@@ -3,6 +3,32 @@ const AppError = require('../utils/AppError');
 const logger = require('../config/logger');
 
 /**
+ * GET /api/rental-collections/tenants
+ * Returns all available tenants for rental collection.
+ */
+exports.getTenants = async (req, res, next) => {
+  try {
+    const predefined = RentalCollection.TENANTS || ['Mahesh', 'Sai', 'Geetha', 'Prasad', 'Rekha'];
+    let distinctTenants = [];
+    try {
+      distinctTenants = await RentalCollection.distinct('tenant', { user: req.user.id });
+    } catch (_) {}
+
+    const tenantsSet = new Set([...predefined, ...(distinctTenants || [])]);
+    const tenants = Array.from(tenantsSet);
+
+    res.status(200).json({
+      status: 'success',
+      results: tenants.length,
+      data: { tenants },
+    });
+  } catch (err) {
+    logger.error('getTenants error', { error: err.message, userId: req.user?.id });
+    next(err);
+  }
+};
+
+/**
  * GET /api/rental-collections
  * Returns all rental collection entries for the authenticated user, newest first.
  */

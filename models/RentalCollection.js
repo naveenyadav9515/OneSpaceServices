@@ -47,4 +47,7 @@ const rentalCollectionSchema = new mongoose.Schema(
 rentalCollectionSchema.index({ user: 1, date: -1 });
 rentalCollectionSchema.index({ user: 1, tenant: 1, date: -1 });
 
-module.exports = mongoose.model('RentalCollection', rentalCollectionSchema);
+const RentalCollection = mongoose.model('RentalCollection', rentalCollectionSchema);
+RentalCollection.TENANTS = TENANTS;
+
+module.exports = RentalCollection;
